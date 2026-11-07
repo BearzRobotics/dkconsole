@@ -1,18 +1,17 @@
 .{
     .name = .dkconsole,
     .fingerprint = 0xc168682336a0c350,
-    .version = "0.0.1",
+    .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
-        // DKTermCore: terminal state, key encoding, colour schemes, PTY. Next to this directory.
-        .dkterm = .{ .path = "../dkterm" },
+        // DKTermCore: terminal state, key encoding, colour schemes, PTY.
+        .dkterm = .{
+            .url = "https://github.com/BearzRobotics/dkterm/releases/download/v0.1.0/dkterm-0.1.0.tar.gz",
+            .hash = "dkterm-0.1.0-yV77apLsAADCq9AS3B3CKDjEV0ubpHDKc0X5ydVef9xD",
+        },
         .toml = .{
             .url = "https://github.com/BearzRobotics/toml-zig/releases/download/v0.1.0/toml-0.1.0.tar.gz",
             .hash = "toml-0.1.0-dDatLI4xAgB1P1SWnx8mnn9oHfDkYSZbqBMOKvKR-X3N",
-        },
-        .ghostty = .{
-            .url = "https://github.com/ghostty-org/ghostty/archive/ce787fc18a7782e81585beb63f0d905ccaf69284.tar.gz",
-            .hash = "ghostty-1.4.0-5UdBC-qohwWqLS0BImOz05t4hVyTwbaKslyTPvKYvAtE",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "data", "third_party", "LICENSE" },

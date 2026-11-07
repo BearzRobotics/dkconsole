@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots dkconsole in QEMU and checks the M8 scenarios (SPEC.md 5.11, 8, 9):
+# Boots dkconsole in QEMU and checks the M8 scenarios (the console spec: login, typing, VT switching, memory, crash recovery, fallback):
 # login on DRM, typing, VT switching, memory, kill -9 recovery, the fallback after
 # repeated crashes, and the fallback with no display device.
 #
@@ -13,13 +13,13 @@
 #
 # Needs: qemu-system-x86_64, zig, python3, and `apt-get download` (Debian or Ubuntu)
 # for the kernel and busybox. No root, no KVM, no VM image. Everything goes in
-# $DKDE_QEMU_CACHE (default ~/.cache/dkde-qemu); the repository is not touched.
+# $DKCONSOLE_QEMU_CACHE (default ~/.cache/dkconsole-qemu); the repository is not touched.
 # Screenshots of each step are kept there as PNG files for looking at.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
-CACHE=${DKDE_QEMU_CACHE:-$HOME/.cache/dkde-qemu}
+CACHE=${DKCONSOLE_QEMU_CACHE:-$HOME/.cache/dkconsole-qemu}
 TOOLS="python3 -I $HERE/tools.py"
 QEMU=${QEMU:-qemu-system-x86_64}
 
@@ -43,9 +43,9 @@ setup() {
         for d in debs/*.deb; do dpkg-deb -x "$d" root; done
     fi
     echo "== building dkconsole (static musl, ReleaseSafe)"
-    (cd "$REPO" && zig build console -Dgui=false -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix "$CACHE/out") || exit 1
+    (cd "$REPO" && zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix "$CACHE/out") || exit 1
     echo "== making the initramfs"
-    rm -rf initrd && mkdir -p initrd/{bin,sbin,etc/dkde,proc,sys,dev,run,tmp,root,usr/bin}
+    rm -rf initrd && mkdir -p initrd/{bin,sbin,etc/dkconsole,proc,sys,dev,run,tmp,root,usr/bin}
     cp root/usr/bin/busybox initrd/bin/busybox 2>/dev/null || cp root/bin/busybox initrd/bin/busybox
     cp out/bin/dkconsole initrd/usr/bin/
     for a in sh mount ls cat login getty sleep echo ps kill grep; do ln -sf busybox "initrd/bin/$a"; done
@@ -55,10 +55,10 @@ setup() {
     printf 'root:x:0:\n' > initrd/etc/group; printf '/bin/sh\n' > initrd/etc/shells
     printf '\\n \\s \\r (\\l)\nwelcome to dkconsole test\n\n' > initrd/etc/issue
     # The fallback getty is busybox's, since the image has no agetty.
-    printf '[console]\nfallback=/bin/busybox getty -L 0 tty%%N linux\n' > initrd/etc/dkconsole/config.toml
+    printf '[console]\nfallback = "/bin/busybox getty -L 0 tty%%N linux"\n' > initrd/etc/dkconsole/config.toml
     # A TrueType font for the M9 check, if the host has one.
     local ttf; ttf=$(ls /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf 2>/dev/null | head -1)
-    [ -n "$ttf" ] && cp "$ttf" initrd/etc/dkde/test.ttf
+    [ -n "$ttf" ] && cp "$ttf" initrd/etc/dkconsole/test.ttf
     $TOOLS cpio initrd initrd.gz
 }
 
@@ -124,14 +124,14 @@ tests() {
     rss=$(grep -o 'VmRSS:[[:space:]]*[0-9]*' serial.log | tail -1 | grep -o '[0-9]*$')
     check "idle RSS ${rss:-?} kB is under 8192 kB" bash -c "[ '${rss:-99999}' -lt 8192 ]"
 
-    if [ -f "$CACHE/initrd/etc/dkde/test.ttf" ]; then
+    if [ -f "$CACHE/initrd/etc/dkconsole/test.ttf" ]; then
         echo "== TrueType font, changed while the console runs"
         shot t0_psf
-        $TOOLS type 'echo font=/etc/dkde/test.ttf >> /etc/dkconsole/config.toml; echo font-size=20 >> /etc/dkconsole/config.toml; ls -l /etc\n'
+        $TOOLS type 'dkconsole config set font /etc/dkconsole/test.ttf; dkconsole config set font-size 20; cat /etc/dkconsole/config.toml\n'
         settle 5; shot t1_ttf
         check "the screen changed after the font did" bash -c "! $TOOLS same '$CACHE/t0_psf.ppm' '$CACHE/t1_ttf.ppm'"
         check "TrueType text is on the screen"        wait_lit t1_ttf 200 10
-        $TOOLS type 'echo font-size=0 >> /etc/dkconsole/config.toml; echo size reset\n'; settle 4
+        $TOOLS type 'dkconsole config set font-size 0; echo size reset\n'; settle 4
     fi
 
     echo "== VT switching"
