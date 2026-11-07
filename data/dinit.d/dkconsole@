@@ -1,0 +1,16 @@
+# dinit service for the dkde text console on one virtual terminal. It replaces
+# agetty: copy to /etc/dinit.d/dkconsole@ and enable one instance per VT:
+#
+#   dinitctl enable dkconsole@1
+#   dinitctl enable dkconsole@2
+#
+# Do not also run agetty on those terminals. The console falls back to
+# /sbin/agetty by itself when it cannot start (see /etc/dkconsole/config.toml), so
+# a broken console never leaves a VT without a login prompt.
+#
+# $1 is the VT number.
+type            = process
+command         = /usr/bin/dkconsole --vt $1
+restart         = true
+smooth-recovery = true
+# Several consoles can run at once; each takes its own VT.
