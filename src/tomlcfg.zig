@@ -179,6 +179,23 @@ test "set keeps types, reports no change, and unknown keys survive" {
     try testing.expectEqualStrings("32", back.get("vt:1", "font-size").?);
 }
 
+test "set and remove keep the comments around other settings" {
+    var d = try Document.parse(testing.allocator,
+        \\# local tweaks
+        \\[console]
+        \\# bigger for the 4K panel
+        \\font-size = 24 # px
+        \\colors = "campbell"
+        \\
+    );
+    defer d.deinit();
+    try testing.expect(try d.set("console", "font-size", "28"));
+    try testing.expect(d.remove("console", "colors"));
+    const out = try d.toOwnedString(testing.allocator);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("# local tweaks\n[console]\n# bigger for the 4K panel\nfont-size = 28 # px\n", out);
+}
+
 test "remove, an empty document, and invalid TOML" {
     var d = Document.init(testing.allocator);
     defer d.deinit();

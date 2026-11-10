@@ -37,8 +37,9 @@ dkconsole config reset [--vt N] KEY
 dkconsole config fonts                    fonts it can use on this system
 ```
 
-Writing `config.toml` keeps unknown keys but not comments (toml-zig does not preserve them),
-which is why the commented documentation lives in `config.example.toml`. A file that is not
+Writing `config.toml` keeps unknown keys and your comments (toml-zig 0.2.0 or later; comments
+inside arrays and inline tables are the one exception). The long commented documentation lives
+in `config.example.toml`. A file that is not
 valid TOML is ignored and the console keeps working with defaults.
 
 ## Testing in QEMU
