@@ -75,5 +75,10 @@ See the spec's open questions: image protocols, launching a Wayland session from
 
 ## Status
 
-0.1.0. The QEMU test passes all 17 checks on a Ubuntu 7.0 kernel with a simpledrm display
-(`scripts/qemu-console-test/run`). It has not been run on real hardware yet.
+0.2.0. The QEMU test passes all 26 checks on a Ubuntu 7.0 kernel with a simpledrm display
+(`scripts/qemu-console-test/run`). It has not been run on real hardware yet; start with
+`docs/HARDWARE-TESTING.md`.
+
+Release tarballs: `dkconsole-VERSION.tar.gz` is the source (dependencies are fetched by `zig build`);
+`dkconsole-VERSION-vendored.tar.gz` also holds every dependency in `zig-pkg/`, so it builds with no
+network (`zig build --system zig-pkg`).

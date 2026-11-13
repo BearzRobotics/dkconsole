@@ -1,7 +1,7 @@
 .{
     .name = .dkconsole,
     .fingerprint = 0xc168682336a0c350,
-    .version = "0.1.1",
+    .version = "0.2.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         // DKTermCore: terminal state, key encoding, colour schemes, PTY.
