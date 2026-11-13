@@ -327,6 +327,7 @@ pub const Console = struct {
             log.err("no DRM device usable: {s}", .{@errorName(e)});
             return false;
         };
+        d.want = self.settings.mode;
         const out = d.probe(self.allocator) catch |e| {
             log.err("no connected display: {s}", .{@errorName(e)});
             d.close();
@@ -579,12 +580,26 @@ pub const Console = struct {
 
     fn printIssue(self: *Console) void {
         const a = self.allocator;
-        const text = sys.readFile(a, "/etc/issue", 64 << 10) catch return;
+        const path = if (self.settings.issue_file.len > 0) self.settings.issue_file else return;
+        const text = sys.readFile(a, path, 64 << 10) catch |e| {
+            if (e != error.NotFound) log.warn("{s}: not shown ({s}; the limit is 64 KiB)", .{ path, @errorName(e) });
+            return;
+        };
         defer a.free(text);
         var uts: issue.Uts = .{};
         var line: [16]u8 = undefined;
         const tty = std.fmt.bufPrint(&line, "tty{d}", .{self.vt_num}) catch "tty";
-        const sysinfo = uts.system(tty);
+        var sysinfo = uts.system(tty);
+        var clock: issue.Clock = .{};
+        clock.now();
+        sysinfo.date = clock.date;
+        sysinfo.time = clock.time;
+        const os_release = sys.readFile(a, "/etc/os-release", 16 << 10) catch a.alloc(u8, 0) catch return;
+        defer a.free(os_release);
+        sysinfo.os_release = os_release;
+        const utmp = sys.readFile(a, "/var/run/utmp", 1 << 20) catch a.alloc(u8, 0) catch return;
+        defer a.free(utmp);
+        sysinfo.users = issue.countUsers(utmp);
         var aw: std.Io.Writer.Allocating = .init(a);
         defer aw.deinit();
         issue.expand(&aw.writer, text, sysinfo) catch return;

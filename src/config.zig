@@ -5,6 +5,7 @@
 const std = @import("std");
 const termcore = @import("termcore");
 const ini = @import("tomlcfg.zig");
+const drm = @import("drm.zig");
 
 pub const group = "console";
 
@@ -28,6 +29,8 @@ pub const keys = [_]Key{
     .{ .name = "fallback-fonts", .kind = .list, .default = "" },
     .{ .name = "font-size", .kind = .int, .default = "0", .min = 0, .max = 128 },
     .{ .name = "scale", .kind = .int, .default = "1", .min = 1, .max = 2 },
+    .{ .name = "mode", .kind = .string, .default = "" },
+    .{ .name = "issue-file", .kind = .string, .default = "/etc/issue" },
     .{ .name = "colors", .kind = .string, .default = "campbell", .choices = &color_schemes },
     .{ .name = "scrollback-lines", .kind = .int, .default = "2000", .min = 0, .max = 100000 },
     .{ .name = "cursor-blink", .kind = .boolean, .default = "false" },
@@ -53,6 +56,8 @@ pub fn check(key: *const Key, value: []const u8) ?[]const u8 {
                 for (key.choices) |c| if (std.mem.eql(u8, c, value)) return null;
                 return "not one of the known choices";
             }
+            if (std.mem.eql(u8, key.name, "mode") and drm.ModeRequest.parse(value) == null) return "expected WIDTHxHEIGHT or WIDTHxHEIGHT@HZ";
+            if (std.mem.eql(u8, key.name, "issue-file") and value.len > 0 and value[0] != '/') return "must be an absolute path";
             return null;
         },
         .int => {
@@ -96,6 +101,8 @@ pub const Settings = struct {
     fallback_fonts: []const u8,
     font_size: u32,
     scale: u32,
+    mode: drm.ModeRequest,
+    issue_file: []const u8,
     colors: []const u8,
     scrollback_lines: u32,
     cursor_blink: bool,
@@ -117,6 +124,8 @@ pub const Settings = struct {
             .fallback_fonts = L.get(layers, vt, "fallback-fonts"),
             .font_size = L.int(layers, vt, "font-size"),
             .scale = @max(1, L.int(layers, vt, "scale")),
+            .mode = drm.ModeRequest.parse(L.get(layers, vt, "mode")) orelse .{},
+            .issue_file = L.get(layers, vt, "issue-file"),
             .colors = L.get(layers, vt, "colors"),
             .scrollback_lines = L.int(layers, vt, "scrollback-lines"),
             .cursor_blink = ini.parseBool(L.get(layers, vt, "cursor-blink")) orelse false,
@@ -178,6 +187,11 @@ test "invalid values fall back instead of failing" {
 test "check explains refusals" {
     try testing.expect(check(find("scale").?, "2") == null);
     try testing.expect(check(find("scale").?, "3") != null);
+    try testing.expect(check(find("mode").?, "1920x1080@60") == null);
+    try testing.expect(check(find("mode").?, "") == null);
+    try testing.expect(check(find("mode").?, "huge") != null);
+    try testing.expect(check(find("issue-file").?, "/etc/issue.net") == null);
+    try testing.expect(check(find("issue-file").?, "issue") != null);
     try testing.expect(check(find("colors").?, "campbell") == null);
     try testing.expect(check(find("colors").?, "x") != null);
     try testing.expect(check(find("cursor-blink").?, "true") == null);

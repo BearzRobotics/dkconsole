@@ -186,6 +186,8 @@ pub const Buffer = struct {
 pub const Device = struct {
     fd: c_int,
     master: bool = false,
+    /// The mode `probe` looks for first (the `mode` setting).
+    want: ModeRequest = .{},
 
     pub const Error = error{ NoDevice, NoDumbBuffers, NoOutput, ModeSetFailed, OutOfMemory, BufferFailed };
 
@@ -274,7 +276,7 @@ pub const Device = struct {
                 .count_encoders = c.count_encoders,
             };
             if (!call(self.fd, IOCTL_GETCONNECTOR, &c2)) continue;
-            const mode = pickMode(modes[0..@min(c2.count_modes, modes.len)]) orelse continue;
+            const mode = pickModeFor(modes[0..@min(c2.count_modes, modes.len)], self.want) orelse continue;
             const crtc = self.pickCrtc(c2.encoder_id, conn_encoders[0..@min(c2.count_encoders, conn_encoders.len)], crtcs[0..@min(res.count_crtcs, crtcs.len)]) orelse continue;
             return .{ .connector_id = cid, .crtc_id = crtc, .mode = mode, .mm_width = c2.mm_width, .mm_height = c2.mm_height };
         }
@@ -372,6 +374,39 @@ pub const Device = struct {
     }
 };
 
+/// A mode the administrator asked for: `1920x1080` or `1920x1080@60`.
+/// Zero fields mean "any".
+pub const ModeRequest = struct {
+    w: u16 = 0,
+    h: u16 = 0,
+    hz: u32 = 0,
+
+    pub fn parse(text: []const u8) ?ModeRequest {
+        if (text.len == 0) return .{};
+        const x = std.mem.indexOfScalar(u8, text, 'x') orelse return null;
+        const at = std.mem.indexOfScalar(u8, text, '@');
+        if (at != null and at.? < x) return null;
+        const w = std.fmt.parseInt(u16, text[0..x], 10) catch return null;
+        const h = std.fmt.parseInt(u16, text[x + 1 .. at orelse text.len], 10) catch return null;
+        const hz: u32 = if (at) |a| (std.fmt.parseInt(u32, text[a + 1 ..], 10) catch return null) else 0;
+        if (w == 0 or h == 0) return null;
+        return .{ .w = w, .h = h, .hz = hz };
+    }
+};
+
+/// The requested mode if the display has it, else the preferred mode, else
+/// the largest progressive one.
+pub fn pickModeFor(modes: []const ModeInfo, want: ModeRequest) ?ModeInfo {
+    if (want.w != 0) {
+        for (modes) |m| {
+            if (m.flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN) != 0) continue;
+            if (m.hdisplay == want.w and m.vdisplay == want.h and (want.hz == 0 or m.vrefresh == want.hz)) return m;
+        }
+        log.warn("display has no {d}x{d} (refresh {d}, 0 = any) mode; using the default one", .{ want.w, want.h, want.hz });
+    }
+    return pickMode(modes);
+}
+
 /// The preferred mode, else the largest progressive one.
 pub fn pickMode(modes: []const ModeInfo) ?ModeInfo {
     var best: ?ModeInfo = null;
@@ -456,4 +491,31 @@ test "preferred mode wins, interlaced is skipped" {
     c.flags = DRM_MODE_FLAG_INTERLACE;
     try testing.expectEqual(@as(u16, 1024), pickMode(&.{ a, c, b }).?.hdisplay);
     try testing.expectEqual(@as(u16, 1920), pickMode(&.{ a, c }).?.hdisplay);
+}
+
+test "requested mode wins when present, else the default" {
+    var a = std.mem.zeroes(ModeInfo);
+    a.hdisplay = 1920;
+    a.vdisplay = 1080;
+    a.vrefresh = 60;
+    var b = a;
+    b.hdisplay = 1024;
+    b.vdisplay = 768;
+    b.type = DRM_MODE_TYPE_PREFERRED;
+    var c = a;
+    c.vrefresh = 30;
+    try testing.expectEqual(@as(u16, 1920), pickModeFor(&.{ b, a }, .{ .w = 1920, .h = 1080 }).?.hdisplay);
+    try testing.expectEqual(@as(u32, 30), pickModeFor(&.{ a, c, b }, .{ .w = 1920, .h = 1080, .hz = 30 }).?.vrefresh);
+    try testing.expectEqual(@as(u16, 1024), pickModeFor(&.{ a, b }, .{ .w = 800, .h = 600 }).?.hdisplay);
+    try testing.expectEqual(@as(u16, 1024), pickModeFor(&.{ a, b }, .{}).?.hdisplay);
+}
+
+test "mode request parsing" {
+    try testing.expectEqual(ModeRequest{ .w = 1920, .h = 1080, .hz = 0 }, ModeRequest.parse("1920x1080").?);
+    try testing.expectEqual(ModeRequest{ .w = 1280, .h = 720, .hz = 60 }, ModeRequest.parse("1280x720@60").?);
+    try testing.expectEqual(ModeRequest{}, ModeRequest.parse("").?);
+    try testing.expect(ModeRequest.parse("big") == null);
+    try testing.expect(ModeRequest.parse("1920x") == null);
+    try testing.expect(ModeRequest.parse("0x0") == null);
+    try testing.expect(ModeRequest.parse("@60x1x2") == null);
 }

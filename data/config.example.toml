@@ -22,6 +22,13 @@ fallback-fonts = ""
 font-size = 0
 # 1, or 2 to double every pixel on very dense screens.
 scale = 1
+# Display mode, WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, for example "1920x1080". Empty,
+# or a mode the display does not have: its preferred mode. Read when the console
+# starts and whenever it takes the display back.
+mode = ""
+# The banner shown before each login. \n \l \s \r \m \v \o \d \t \u \U \S \S{VAR}
+# and \e are expanded; a missing file shows nothing. Empty turns the banner off.
+issue-file = "/etc/issue"
 # campbell, one-half-dark, solarized-dark or solarized-light
 colors = "campbell"
 # Lines kept for Shift+PageUp.
