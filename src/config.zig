@@ -30,6 +30,8 @@ pub const keys = [_]Key{
     .{ .name = "font-size", .kind = .int, .default = "0", .min = 0, .max = 128 },
     .{ .name = "scale", .kind = .int, .default = "1", .min = 1, .max = 2 },
     .{ .name = "mode", .kind = .string, .default = "" },
+    .{ .name = "display", .kind = .string, .default = "" },
+    .{ .name = "login-program", .kind = .string, .default = "" },
     .{ .name = "issue-file", .kind = .string, .default = "/etc/issue" },
     .{ .name = "colors", .kind = .string, .default = "campbell", .choices = &color_schemes },
     .{ .name = "scrollback-lines", .kind = .int, .default = "2000", .min = 0, .max = 100000 },
@@ -57,6 +59,8 @@ pub fn check(key: *const Key, value: []const u8) ?[]const u8 {
                 return "not one of the known choices";
             }
             if (std.mem.eql(u8, key.name, "mode") and drm.ModeRequest.parse(value) == null) return "expected WIDTHxHEIGHT or WIDTHxHEIGHT@HZ";
+            if (std.mem.eql(u8, key.name, "login-program") and value.len > 0 and value[0] != '/') return "must be an absolute path";
+            if (std.mem.eql(u8, key.name, "display") and std.mem.indexOfAny(u8, value, " /\t") != null) return "expected a connector name such as HDMI-A-1";
             if (std.mem.eql(u8, key.name, "issue-file") and value.len > 0 and value[0] != '/') return "must be an absolute path";
             return null;
         },
@@ -102,6 +106,9 @@ pub const Settings = struct {
     font_size: u32,
     scale: u32,
     mode: drm.ModeRequest,
+    mode_text: []const u8,
+    display: []const u8,
+    login_program: []const u8,
     issue_file: []const u8,
     colors: []const u8,
     scrollback_lines: u32,
@@ -125,6 +132,9 @@ pub const Settings = struct {
             .font_size = L.int(layers, vt, "font-size"),
             .scale = @max(1, L.int(layers, vt, "scale")),
             .mode = drm.ModeRequest.parse(L.get(layers, vt, "mode")) orelse .{},
+            .mode_text = L.get(layers, vt, "mode"),
+            .display = L.get(layers, vt, "display"),
+            .login_program = L.get(layers, vt, "login-program"),
             .issue_file = L.get(layers, vt, "issue-file"),
             .colors = L.get(layers, vt, "colors"),
             .scrollback_lines = L.int(layers, vt, "scrollback-lines"),
@@ -192,6 +202,10 @@ test "check explains refusals" {
     try testing.expect(check(find("mode").?, "huge") != null);
     try testing.expect(check(find("issue-file").?, "/etc/issue.net") == null);
     try testing.expect(check(find("issue-file").?, "issue") != null);
+    try testing.expect(check(find("display").?, "HDMI-A-1") == null);
+    try testing.expect(check(find("display").?, "HDMI A") != null);
+    try testing.expect(check(find("login-program").?, "/bin/login") == null);
+    try testing.expect(check(find("login-program").?, "login") != null);
     try testing.expect(check(find("colors").?, "campbell") == null);
     try testing.expect(check(find("colors").?, "x") != null);
     try testing.expect(check(find("cursor-blink").?, "true") == null);

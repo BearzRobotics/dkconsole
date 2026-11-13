@@ -16,6 +16,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .strip = strip,
     });
+    const opts = b.addOptions();
+    opts.addOption([]const u8, "version", @import("build.zig.zon").version);
+    mod.addOptions("build_options", opts);
     mod.addImport("termcore", dkterm.module("termcore"));
     mod.addImport("toml", toml.module("toml"));
     mod.addImport("ghostty-vt", dkterm.module("ghostty-vt"));

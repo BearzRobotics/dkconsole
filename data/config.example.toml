@@ -23,9 +23,14 @@ font-size = 0
 # 1, or 2 to double every pixel on very dense screens.
 scale = 1
 # Display mode, WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, for example "1920x1080". Empty,
-# or a mode the display does not have: its preferred mode. Read when the console
-# starts and whenever it takes the display back.
+# or a mode the display does not have: its preferred mode. Applies at once.
 mode = ""
+# The connector to use, by the kernel's name: HDMI-A-1, DP-2, eDP-1 and so on.
+# `dkconsole report` lists the names. Empty: the first connected display.
+display = ""
+# The program that asks for the user name and password. Empty: the first of
+# /bin/login, /usr/bin/login, /sbin/login, /usr/sbin/login that exists.
+login-program = ""
 # The banner shown before each login. \n \l \s \r \m \v \o \d \t \u \U \S \S{VAR}
 # and \e are expanded; a missing file shows nothing. Empty turns the banner off.
 issue-file = "/etc/issue"

@@ -6,6 +6,7 @@
 const std = @import("std");
 const configtool = @import("configtool.zig");
 const console = @import("console.zig");
+const report = @import("report.zig");
 const sys = @import("sys.zig");
 
 // The compiled-in level lets everything through; `sys.log_level` filters while
@@ -23,6 +24,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (args.items.len >= 1 and std.mem.eql(u8, args.items[0], "config")) {
         std.process.exit(configtool.run(arena, args.items[1..]));
     }
+    if (args.items.len == 1 and std.mem.eql(u8, args.items[0], "report")) std.process.exit(report.report(arena));
+    if (args.items.len >= 1 and std.mem.eql(u8, args.items[0], "recovery")) std.process.exit(report.recovery(arena, args.items[1..]));
+    if (args.items.len == 1 and (std.mem.eql(u8, args.items[0], "--version") or std.mem.eql(u8, args.items[0], "version"))) {
+        sys.print(1, "dkconsole {s}\n", .{@import("build_options").version});
+        std.process.exit(0);
+    }
     if (args.items.len == 2 and std.mem.eql(u8, args.items[0], "--vt")) {
         const n = std.fmt.parseInt(u32, args.items[1], 10) catch 0;
         if (n >= 1 and n <= 63) std.process.exit(console.run(arena, .{ .vt = n }));
@@ -30,6 +37,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const usage =
         \\usage: dkconsole --vt N          run on virtual terminal N
         \\       dkconsole config ...      change the console settings
+        \\       dkconsole report          what the console sees, for a bug report
+        \\       dkconsole recovery ...    crash counter: status, reset --vt N
+        \\       dkconsole version
         \\
     ;
     _ = std.c.write(2, usage.ptr, usage.len);
@@ -38,6 +48,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test {
     _ = @import("issue.zig");
+    _ = @import("report.zig");
     _ = @import("configtool.zig");
     _ = @import("kbd.zig");
     _ = @import("drm.zig");

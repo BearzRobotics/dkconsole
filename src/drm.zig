@@ -108,9 +108,21 @@ const FbCmd2 = extern struct {
     modifier: [4]u64 = @splat(0),
 };
 const PageFlip = extern struct { crtc_id: u32, fb_id: u32, flags: u32, reserved: u32 = 0, user_data: u64 = 0 };
+const Version = extern struct {
+    major: c_int = 0,
+    minor: c_int = 0,
+    patch: c_int = 0,
+    name_len: usize = 0,
+    name: usize = 0,
+    date_len: usize = 0,
+    date: usize = 0,
+    desc_len: usize = 0,
+    desc: usize = 0,
+};
 const GetCap = extern struct { capability: u64, value: u64 = 0 };
 const Event = extern struct { type: u32, length: u32 };
 
+const IOCTL_VERSION = iowr(0x00, Version);
 const IOCTL_GET_CAP = iowr(0x0c, GetCap);
 const IOCTL_SET_MASTER = ioc(IOC_NONE, 0x1e, 0);
 const IOCTL_DROP_MASTER = ioc(IOC_NONE, 0x1f, 0);
@@ -159,6 +171,8 @@ pub const Output = struct {
     mode: ModeInfo,
     mm_width: u32,
     mm_height: u32,
+    connector_type: u32 = 0,
+    connector_type_id: u32 = 0,
 
     pub fn width(self: Output) u32 {
         return self.mode.hdisplay;
@@ -188,6 +202,9 @@ pub const Device = struct {
     master: bool = false,
     /// The mode `probe` looks for first (the `mode` setting).
     want: ModeRequest = .{},
+    /// The connector name asked for (`display` setting); empty means the first connected one.
+    display: [24]u8 = undefined,
+    display_len: u8 = 0,
 
     pub const Error = error{ NoDevice, NoDumbBuffers, NoOutput, ModeSetFailed, OutOfMemory, BufferFailed };
 
@@ -239,16 +256,73 @@ pub const Device = struct {
         if (call(self.fd, IOCTL_DROP_MASTER, null)) self.master = false;
     }
 
-    /// Find the first connected connector, its preferred mode and a CRTC for it.
-    pub fn probe(self: *Device, allocator: std.mem.Allocator) Error!Output {
+    /// The connector to use, by its kernel name (`HDMI-A-1`); empty: the first connected one.
+    pub fn setDisplay(self: *Device, name: []const u8) void {
+        const n = @min(name.len, self.display.len);
+        @memcpy(self.display[0..n], name[0..n]);
+        self.display_len = @intCast(n);
+    }
+
+    fn wantedDisplay(self: *const Device) []const u8 {
+        return self.display[0..self.display_len];
+    }
+
+    const Connector = struct {
+        info: GetConnector,
+        modes: []ModeInfo,
+        encoders: []u32,
+
+        fn deinit(self: Connector, allocator: std.mem.Allocator) void {
+            allocator.free(self.modes);
+            allocator.free(self.encoders);
+        }
+    };
+
+    /// GETCONNECTOR twice, the first time for the counts. The caller frees.
+    fn readConnector(self: *Device, allocator: std.mem.Allocator, cid: u32) ?Connector {
+        var c: GetConnector = .{ .connector_id = cid };
+        if (!call(self.fd, IOCTL_GETCONNECTOR, &c)) return null;
+        const modes = allocator.alloc(ModeInfo, c.count_modes) catch return null;
+        const encs = allocator.alloc(u32, c.count_encoders) catch {
+            allocator.free(modes);
+            return null;
+        };
+        var c2: GetConnector = .{
+            .connector_id = cid,
+            .modes_ptr = @intFromPtr(modes.ptr),
+            .encoders_ptr = @intFromPtr(encs.ptr),
+            .count_modes = c.count_modes,
+            .count_encoders = c.count_encoders,
+        };
+        if (!call(self.fd, IOCTL_GETCONNECTOR, &c2)) {
+            allocator.free(modes);
+            allocator.free(encs);
+            return null;
+        }
+        return .{ .info = c2, .modes = modes[0..@min(c2.count_modes, modes.len)], .encoders = encs[0..@min(c2.count_encoders, encs.len)] };
+    }
+
+    const Resources = struct {
+        connectors: []u32,
+        crtcs: []u32,
+        encoders: []u32,
+
+        fn deinit(self: Resources, allocator: std.mem.Allocator) void {
+            allocator.free(self.connectors);
+            allocator.free(self.crtcs);
+            allocator.free(self.encoders);
+        }
+    };
+
+    fn readResources(self: *Device, allocator: std.mem.Allocator) Error!Resources {
         var res: CardRes = .{};
         if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
         const connectors = try allocator.alloc(u32, res.count_connectors);
-        defer allocator.free(connectors);
+        errdefer allocator.free(connectors);
         const crtcs = try allocator.alloc(u32, res.count_crtcs);
-        defer allocator.free(crtcs);
+        errdefer allocator.free(crtcs);
         const encoders = try allocator.alloc(u32, res.count_encoders);
-        defer allocator.free(encoders);
+        errdefer allocator.free(encoders);
         res = .{
             .connector_id_ptr = @intFromPtr(connectors.ptr),
             .crtc_id_ptr = @intFromPtr(crtcs.ptr),
@@ -258,29 +332,78 @@ pub const Device = struct {
             .count_encoders = res.count_encoders,
         };
         if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
+        return .{
+            .connectors = connectors[0..@min(res.count_connectors, connectors.len)],
+            .crtcs = crtcs[0..@min(res.count_crtcs, crtcs.len)],
+            .encoders = encoders,
+        };
+    }
 
-        for (connectors[0..@min(res.count_connectors, connectors.len)]) |cid| {
-            var c: GetConnector = .{ .connector_id = cid };
-            if (!call(self.fd, IOCTL_GETCONNECTOR, &c)) continue;
-            if (c.connection != DRM_MODE_CONNECTED or c.count_modes == 0) continue;
+    /// Find the wanted (`display`) or else first connected connector, its mode and a CRTC for it.
+    pub fn probe(self: *Device, allocator: std.mem.Allocator) Error!Output {
+        const res = try self.readResources(allocator);
+        defer res.deinit(allocator);
+        const want_name = self.wantedDisplay();
+        var skipped_for_name = false;
 
-            const modes = try allocator.alloc(ModeInfo, c.count_modes);
-            defer allocator.free(modes);
-            const conn_encoders = try allocator.alloc(u32, c.count_encoders);
-            defer allocator.free(conn_encoders);
-            var c2: GetConnector = .{
-                .connector_id = cid,
-                .modes_ptr = @intFromPtr(modes.ptr),
-                .encoders_ptr = @intFromPtr(conn_encoders.ptr),
-                .count_modes = c.count_modes,
-                .count_encoders = c.count_encoders,
-            };
-            if (!call(self.fd, IOCTL_GETCONNECTOR, &c2)) continue;
-            const mode = pickModeFor(modes[0..@min(c2.count_modes, modes.len)], self.want) orelse continue;
-            const crtc = self.pickCrtc(c2.encoder_id, conn_encoders[0..@min(c2.count_encoders, conn_encoders.len)], crtcs[0..@min(res.count_crtcs, crtcs.len)]) orelse continue;
-            return .{ .connector_id = cid, .crtc_id = crtc, .mode = mode, .mm_width = c2.mm_width, .mm_height = c2.mm_height };
+        for (res.connectors) |cid| {
+            const conn = self.readConnector(allocator, cid) orelse continue;
+            defer conn.deinit(allocator);
+            const c = conn.info;
+            if (c.connection != DRM_MODE_CONNECTED or conn.modes.len == 0) continue;
+            if (want_name.len > 0) {
+                var nb: [32]u8 = undefined;
+                if (!std.mem.eql(u8, connectorName(&nb, c.connector_type, c.connector_type_id), want_name)) {
+                    skipped_for_name = true;
+                    continue;
+                }
+            }
+            const mode = pickModeFor(conn.modes, self.want) orelse continue;
+            const crtc = self.pickCrtc(c.encoder_id, conn.encoders, res.crtcs) orelse continue;
+            return .{ .connector_id = cid, .crtc_id = crtc, .mode = mode, .mm_width = c.mm_width, .mm_height = c.mm_height, .connector_type = c.connector_type, .connector_type_id = c.connector_type_id };
         }
+        if (skipped_for_name) log.warn("no connected display is named {s}; see `dkconsole report` for the names", .{want_name});
         return error.NoOutput;
+    }
+
+    /// The kernel driver's name and version, `i915 1.6.0`.
+    pub fn driver(self: *Device, buf: []u8) []const u8 {
+        var name: [64]u8 = undefined;
+        var v: Version = .{ .name_len = name.len, .name = @intFromPtr(&name) };
+        if (!call(self.fd, IOCTL_VERSION, &v)) return "unknown";
+        const n = @min(v.name_len, name.len);
+        return std.fmt.bufPrint(buf, "{s} {d}.{d}.{d}", .{ name[0..n], v.major, v.minor, v.patch }) catch "unknown";
+    }
+
+    /// One line per connector and mode, for the log and `dkconsole report`.
+    pub fn describe(self: *Device, allocator: std.mem.Allocator, w: *std.Io.Writer) !void {
+        var db: [96]u8 = undefined;
+        try w.print("driver {s}\n", .{self.driver(&db)});
+        const res = self.readResources(allocator) catch |e| return w.print("cannot read the display resources: {s}\n", .{@errorName(e)});
+        defer res.deinit(allocator);
+        try w.print("{d} connector(s), {d} crtc(s)\n", .{ res.connectors.len, res.crtcs.len });
+        for (res.connectors) |cid| {
+            const conn = self.readConnector(allocator, cid) orelse {
+                try w.print("connector {d}: cannot be read\n", .{cid});
+                continue;
+            };
+            defer conn.deinit(allocator);
+            const c = conn.info;
+            var nb: [32]u8 = undefined;
+            const state = switch (c.connection) {
+                1 => "connected",
+                2 => "disconnected",
+                else => "unknown",
+            };
+            try w.print("connector {d} {s}: {s}, {d}x{d} mm, {d} mode(s)\n", .{ cid, connectorName(&nb, c.connector_type, c.connector_type_id), state, c.mm_width, c.mm_height, conn.modes.len });
+            if (c.connection != DRM_MODE_CONNECTED) continue;
+            for (conn.modes) |m| {
+                try w.print("  mode {d}x{d}@{d}{s}{s}{s}\n", .{
+                    m.hdisplay,                                                       m.vdisplay,                                                  m.vrefresh,
+                    if (m.type & DRM_MODE_TYPE_PREFERRED != 0) " preferred" else "", if (m.flags & DRM_MODE_FLAG_INTERLACE != 0) " interlaced" else "", if (m.flags & DRM_MODE_FLAG_DBLSCAN != 0) " doublescan" else "",
+                });
+            }
+        }
     }
 
     fn pickCrtc(self: *Device, current_encoder: u32, conn_encoders: []const u32, crtcs: []const u32) ?u32 {
@@ -373,6 +496,14 @@ pub const Device = struct {
         return done;
     }
 };
+
+const connector_names = [_][]const u8{ "Unknown", "VGA", "DVI-I", "DVI-D", "DVI-A", "Composite", "SVIDEO", "LVDS", "Component", "9PinDIN", "DP", "HDMI-A", "HDMI-B", "TV", "eDP", "Virtual", "DSI", "DPI", "Writeback", "SPI", "USB" };
+
+/// The kernel's name for a connector, `HDMI-A-1` (what /sys/class/drm shows after `cardN-`).
+pub fn connectorName(buf: []u8, connector_type: u32, type_id: u32) []const u8 {
+    const base = if (connector_type < connector_names.len) connector_names[connector_type] else "Unknown";
+    return std.fmt.bufPrint(buf, "{s}-{d}", .{ base, type_id }) catch base;
+}
 
 /// A mode the administrator asked for: `1920x1080` or `1920x1080@60`.
 /// Zero fields mean "any".
@@ -518,4 +649,12 @@ test "mode request parsing" {
     try testing.expect(ModeRequest.parse("1920x") == null);
     try testing.expect(ModeRequest.parse("0x0") == null);
     try testing.expect(ModeRequest.parse("@60x1x2") == null);
+}
+
+test "connector names follow the kernel's" {
+    var b: [32]u8 = undefined;
+    try testing.expectEqualStrings("HDMI-A-1", connectorName(&b, 11, 1));
+    try testing.expectEqualStrings("eDP-1", connectorName(&b, 14, 1));
+    try testing.expectEqualStrings("DP-3", connectorName(&b, 10, 3));
+    try testing.expectEqualStrings("Unknown-2", connectorName(&b, 99, 2));
 }

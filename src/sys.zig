@@ -144,6 +144,27 @@ pub var log_vt: u32 = 0;
 const Timespec = extern struct { sec: c_long, nsec: c_long };
 extern fn clock_gettime(clock: c_int, ts: *Timespec) c_int;
 
+/// A copy of every log line goes to a file under /run, so a report can include
+/// what the console said even when the init system's log is out of reach.
+var log_fd: c_int = -1;
+var log_bytes: usize = 0;
+const log_cap = 1 << 20;
+
+/// Start `<dir>/tty<vt>.log`, keeping the previous one as `.log.1`.
+pub fn openLogFile(dir: []const u8, vt: u32) void {
+    var pb: [96]u8 = undefined;
+    var ob: [100]u8 = undefined;
+    const path = std.fmt.bufPrint(&pb, "{s}/tty{d}.log", .{ dir, vt }) catch return;
+    const old = std.fmt.bufPrint(&ob, "{s}.1", .{path}) catch return;
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    makeDir(dir);
+    const pz = pathZ(&b1, path) orelse return;
+    const oz = pathZ(&b2, old) orelse return;
+    _ = rename(pz.ptr, oz.ptr);
+    log_fd = open(pz.ptr, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, @as(c_uint, 0o644));
+}
+
 pub fn parseLevel(text: []const u8) std.log.Level {
     if (std.mem.eql(u8, text, "error")) return .err;
     if (std.mem.eql(u8, text, "warn")) return .warn;
@@ -171,4 +192,8 @@ pub fn logFn(
     if (scope != .default) w.print("({s})", .{@tagName(scope)}) catch {};
     w.print(": " ++ fmt ++ "\n", args) catch {};
     writeAllFd(2, w.buffered()) catch {};
+    if (log_fd >= 0 and log_bytes < log_cap) {
+        writeAllFd(log_fd, w.buffered()) catch {};
+        log_bytes += w.buffered().len;
+    }
 }

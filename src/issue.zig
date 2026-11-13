@@ -22,7 +22,79 @@ pub const System = struct {
     domain: []const u8 = "",
     /// The text of /etc/os-release, for `\S` and `\S{VAR}`.
     os_release: []const u8 = "",
+    /// Looks up the address for `\4` (family 4) and `\6` (family 6), on the
+    /// named interface or on any when `iface` is empty. Returns "" if none.
+    addr_fn: ?*const fn (family: u8, iface: []const u8, buf: []u8) []const u8 = null,
 };
+
+const IfAddrs = extern struct {
+    next: ?*IfAddrs,
+    name: [*:0]const u8,
+    flags: c_uint,
+    addr: ?*const extern struct { family: u16, port: u16, data: [24]u8 },
+};
+extern fn getifaddrs(out: *?*IfAddrs) c_int;
+extern fn freeifaddrs(list: ?*IfAddrs) void;
+
+const IFF_LOOPBACK = 0x8;
+
+/// Format an IPv6 address with the longest run of zero groups as `::`.
+pub fn formatIp6(buf: []u8, a: [16]u8) []const u8 {
+    var g: [8]u16 = undefined;
+    for (0..8) |i| g[i] = std.mem.readInt(u16, a[i * 2 ..][0..2], .big);
+    var best_start: usize = 8;
+    var best_len: usize = 0;
+    var i: usize = 0;
+    while (i < 8) {
+        if (g[i] != 0) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < 8 and g[j] == 0) j += 1;
+        if (j - i > best_len and j - i >= 2) {
+            best_start = i;
+            best_len = j - i;
+        }
+        i = j;
+    }
+    var w: std.Io.Writer = .fixed(buf);
+    i = 0;
+    while (i < 8) {
+        if (i == best_start) {
+            w.writeAll("::") catch {};
+            i += best_len;
+            continue;
+        }
+        if (i > 0 and i != best_start + best_len) w.writeByte(':') catch {};
+        w.print("{x}", .{g[i]}) catch {};
+        i += 1;
+    }
+    return w.buffered();
+}
+
+/// The first usable address of `family` (4 or 6) on `iface` (empty: any),
+/// skipping loopback and, for IPv6, link-local addresses.
+pub fn systemAddress(family: u8, iface: []const u8, buf: []u8) []const u8 {
+    var list: ?*IfAddrs = null;
+    if (getifaddrs(&list) != 0) return "";
+    defer freeifaddrs(list);
+    var it = list;
+    while (it) |ifa| : (it = ifa.next) {
+        const a = ifa.addr orelse continue;
+        if (ifa.flags & IFF_LOOPBACK != 0) continue;
+        if (iface.len > 0 and !std.mem.eql(u8, std.mem.span(ifa.name), iface)) continue;
+        if (family == 4 and a.family == 2) {
+            return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ a.data[0], a.data[1], a.data[2], a.data[3] }) catch "";
+        }
+        if (family == 6 and a.family == 10) {
+            const ip: [16]u8 = a.data[4..20].*;
+            if (ip[0] == 0xfe and ip[1] & 0xc0 == 0x80) continue; // fe80::/10
+            return formatIp6(buf, ip);
+        }
+    }
+    return "";
+}
 
 /// The value of `name` in os-release text (`NAME=value`, optionally quoted),
 /// or null.
@@ -129,6 +201,20 @@ pub fn expand(out: *std.Io.Writer, text: []const u8, sys: System) !void {
             'd' => try out.writeAll(sys.date),
             't' => try out.writeAll(sys.time),
             'e' => try out.writeByte(0x1b),
+            '4', '6' => {
+                const family: u8 = text[i] - '0';
+                var iface: []const u8 = "";
+                if (i + 1 < text.len and text[i + 1] == '{') {
+                    if (std.mem.indexOfScalarPos(u8, text, i + 2, '}')) |end| {
+                        iface = text[i + 2 .. end];
+                        i = end;
+                    }
+                }
+                if (sys.addr_fn) |f| {
+                    var b: [64]u8 = undefined;
+                    try out.writeAll(f(family, iface, &b));
+                }
+            },
             'o', 'O' => try out.writeAll(sys.domain),
             'S' => {
                 // `\S` is the distribution's pretty name, `\S{VAR}` any os-release field.
@@ -198,4 +284,32 @@ test "user counting" {
     std.mem.writeInt(u16, buf[768..][0..2], 7, builtin.cpu.arch.endian());
     try std.testing.expectEqual(@as(u32, 2), countUsers(&buf));
     try std.testing.expectEqual(@as(u32, 0), countUsers(buf[0..100]));
+}
+
+fn fakeAddr(family: u8, iface: []const u8, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "ip{d}:{s}", .{ family, iface }) catch "";
+}
+
+test "address escapes" {
+    const out = try run("\\4 \\6{eth0} \\4{", .{ .addr_fn = fakeAddr });
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("ip4: ip6:eth0 ip4:{", out);
+    const none = try run("[\\4]", .{});
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqualStrings("[]", none);
+}
+
+test "ipv6 formatting" {
+    var b: [64]u8 = undefined;
+    var a: [16]u8 = @splat(0);
+    a[0] = 0x20;
+    a[1] = 0x01;
+    a[2] = 0x0d;
+    a[3] = 0xb8;
+    a[15] = 1;
+    try std.testing.expectEqualStrings("2001:db8::1", formatIp6(&b, a));
+    try std.testing.expectEqualStrings("::", formatIp6(&b, @splat(0)));
+    var c: [16]u8 = @splat(0);
+    c[15] = 1;
+    try std.testing.expectEqualStrings("::1", formatIp6(&b, c));
 }

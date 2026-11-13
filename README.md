@@ -27,7 +27,8 @@ TOML, read with toml-zig: `/etc/dkconsole/config.toml` (`$DKCONSOLE_CONFIG` over
 with `[console]` for every VT and `[vt.N]` to override keys for one. The shipped defaults and the
 meaning of every key are in `data/config.example.toml` (installed to
 `share/dkconsole/config.example.toml`). Changes apply to running consoles at once, except
-`fallback`.
+`fallback`. The ones people reach for first: `font`/`font-size`/`scale`, `mode` (a display
+resolution such as `1920x1080@60`), `display` (which connector), `issue-file` and `login-program`.
 
 ```
 dkconsole config list [--vt N]            what is in effect, and where each value comes from
@@ -42,12 +43,25 @@ inside arrays and inline tables are the one exception). The long commented docum
 in `config.example.toml`. A file that is not
 valid TOML is ignored and the console keeps working with defaults.
 
+## Diagnostics
+
+```
+dkconsole report                          what the console sees, to attach to a bug report
+dkconsole recovery status [--vt N]        crash counter: will the next start go to agetty?
+dkconsole recovery reset --vt N           clear it (root); does not disturb a running console
+dkconsole version
+```
+
+The console logs to standard error (your init system's log) and to `/run/dkconsole/ttyN.log`.
+`/etc/issue` escapes: `\n \l \s \r \m \v \o \O \d \t \u \U \S \S{VAR} \4 \4{if} \6 \6{if} \e`.
+See `docs/HARDWARE-TESTING.md` before trying it on real hardware.
+
 ## Testing in QEMU
 
 `scripts/qemu-console-test/run` boots the static console in QEMU (no root, no KVM needed, Debian
 or Ubuntu for the kernel and busybox) and checks: login on a DRM display, typing, idle memory,
 a TrueType font changed while it runs, VT switching, recovery from `kill -9`, the fallback after
-repeated crashes, and the fallback when there is no display. Screenshots of each step are kept
+repeated crashes, the fallback when there is no display, `dkconsole report` and a display-mode change while running. Screenshots of each step are kept
 in `~/.cache/dkconsole-qemu`.
 
 ```

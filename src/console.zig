@@ -13,6 +13,7 @@ const drm = @import("drm.zig");
 const evdev = @import("evdev.zig");
 const fallback = @import("fallback.zig");
 const issue = @import("issue.zig");
+const build_options = @import("build_options");
 const kbd = @import("kbd.zig");
 const psf = @import("psf.zig");
 const ttf = @import("ttf.zig");
@@ -201,6 +202,7 @@ pub const Console = struct {
     fn main(self: *Console) u8 {
         const a = self.allocator;
         sys.log_vt = self.vt_num;
+        sys.openLogFile(fallback.state_dir, self.vt_num);
         self.vtdev = vtmod.Vt.open(self.vt_num) orelse {
             log.err("cannot open /dev/tty{d}: errno {d}", .{ self.vt_num, sys.errno() });
             return 1;
@@ -210,6 +212,9 @@ pub const Console = struct {
 
         self.loadSettings();
         const starts = fallback.readCounter(a, self.vt_num);
+        var uts: issue.Uts = .{};
+        const sysinfo = uts.system("");
+        log.info("dkconsole {s} on {s} {s} {s}", .{ build_options.version, sysinfo.sysname, sysinfo.release, sysinfo.machine });
         log.info("starting on tty{d}: {d} start(s) in the last {d} s, euid {d}", .{ self.vt_num, starts, fallback.healthy_seconds, std.c.geteuid() });
         const decision = fallback.decide(starts);
         if (decision.fall_back) {
@@ -286,10 +291,11 @@ pub const Console = struct {
         self.scheme = termcore.schemes.scheme(self.settings.colors);
         sys.log_level = sys.parseLevel(self.settings.log_level);
         self.warnInvalidSettings();
-        log.info("settings: font='{s}' size={d} scale={d} colors={s} scrollback={d} log-level={s}", .{
-            self.settings.font,                                         self.settings.font_size, self.settings.scale,
-            self.settings.colors,                                       self.settings.scrollback_lines,
-            self.settings.log_level,
+        log.info("settings: font='{s}' size={d} scale={d} colors={s} scrollback={d} log-level={s} mode='{s}' display='{s}' issue-file='{s}' login-program='{s}'", .{
+            self.settings.font,        self.settings.font_size,        self.settings.scale,
+            self.settings.colors,      self.settings.scrollback_lines, self.settings.log_level,
+            self.settings.mode_text,   self.settings.display,          self.settings.issue_file,
+            self.settings.login_program,
         });
     }
 
@@ -328,12 +334,18 @@ pub const Console = struct {
             return false;
         };
         d.want = self.settings.mode;
+        d.setDisplay(self.settings.display);
+        self.logDisplays(&d);
         const out = d.probe(self.allocator) catch |e| {
             log.err("no connected display: {s}", .{@errorName(e)});
             d.close();
             return false;
         };
-        log.info("display: connector {d}, {d}x{d}, {d}x{d} mm", .{ out.connector_id, out.width(), out.height(), out.mm_width, out.mm_height });
+        var nb: [32]u8 = undefined;
+        log.info("display: connector {d} ({s}), {d}x{d}@{d}, {d}x{d} mm", .{
+            out.connector_id,  drm.connectorName(&nb, out.connector_type, out.connector_type_id), out.width(), out.height(), out.mode.vrefresh,
+            out.mm_width, out.mm_height,
+        });
         self.dev = d;
         self.out = out;
         self.buildLayout() catch {
@@ -342,6 +354,16 @@ pub const Console = struct {
             return false;
         };
         return true;
+    }
+
+    /// Everything the driver reports, one log line each, so a report from a
+    /// machine says what the display could do and not only what was chosen.
+    fn logDisplays(self: *Console, d: *drm.Device) void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        d.describe(self.allocator, &aw.writer) catch return;
+        var it = std.mem.splitScalar(u8, aw.written(), '\n');
+        while (it.next()) |l| if (l.len > 0) log.info("drm: {s}", .{l});
     }
 
     fn closeDisplay(self: *Console) void {
@@ -402,8 +424,11 @@ pub const Console = struct {
         log.debug("acquire: taking the display", .{});
         d.setMaster();
         // Outputs are probed again on every acquire (SPEC.md 5.11).
+        d.want = self.settings.mode;
+        d.setDisplay(self.settings.display);
         if (d.probe(self.allocator)) |o| {
             const resized = o.width() != self.out.width() or o.height() != self.out.height();
+            log.info("acquire: {d}x{d}@{d}{s}", .{ o.width(), o.height(), o.mode.vrefresh, if (resized) " (changed)" else "" });
             self.out = o;
             if (resized or self.layout_stale) {
                 self.buildLayout() catch {};
@@ -557,7 +582,10 @@ pub const Console = struct {
         }
         self.login_started_at = nowSeconds();
         self.printIssue();
-        const path: [:0]const u8 = for (login_paths) |p| {
+        const configured = a.dupeSentinel(u8, self.settings.login_program, 0) catch return;
+        defer a.free(configured);
+        if (configured.len > 0 and !sys.exists(configured)) log.warn("login-program {s} does not exist; looking for a login in the usual places", .{configured});
+        const path: [:0]const u8 = if (configured.len > 0 and sys.exists(configured)) configured else for (login_paths) |p| {
             if (sys.exists(p)) break p;
         } else {
             log.err("no login program found (tried {s}, ...)", .{login_paths[0]});
@@ -600,6 +628,7 @@ pub const Console = struct {
         const utmp = sys.readFile(a, "/var/run/utmp", 1 << 20) catch a.alloc(u8, 0) catch return;
         defer a.free(utmp);
         sysinfo.users = issue.countUsers(utmp);
+        sysinfo.addr_fn = issue.systemAddress;
         var aw: std.Io.Writer.Allocating = .init(a);
         defer aw.deinit();
         issue.expand(&aw.writer, text, sysinfo) catch return;
@@ -733,6 +762,9 @@ pub const Console = struct {
         defer a.free(old_fallbacks);
         const old_size = self.settings.font_size;
         const old_scale = self.settings.scale;
+        const old_mode = self.settings.mode;
+        const old_display = a.dupe(u8, self.settings.display) catch return;
+        defer a.free(old_display);
         log.info("{s} changed; reading it again", .{configtool.etcPath()});
         self.loadSettings();
         // Fonts and colours change on the next frame; `fallback` is read at start-up.
@@ -747,6 +779,12 @@ pub const Console = struct {
                 };
                 self.resizeTerminal();
             } else self.layout_stale = true;
+        }
+        // A different mode or connector is applied by taking the display again.
+        if (self.have_display and (!std.meta.eql(old_mode, self.settings.mode) or !std.mem.eql(u8, old_display, self.settings.display))) {
+            log.info("display settings changed; switching the display", .{});
+            self.releaseDisplayResources();
+            self.acquire();
         }
         self.term.colors.background = .init(termcore.glue.rgb(self.scheme.background));
         self.term.colors.foreground = .init(termcore.glue.rgb(self.scheme.foreground));
