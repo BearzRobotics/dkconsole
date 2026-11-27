@@ -5,9 +5,9 @@
 #
 #   scripts/qemu-console-test/run [setup|test|boot|clean]
 #
-#   (no argument)  setup if needed, then run every check
+#   (no argument)  setup (always rebuilding the console), then run every check
 #   setup          build the console (static musl), fetch a kernel and busybox, make the initramfs
-#   test           run the checks
+#   test           run the checks on whatever setup last built
 #   boot           just boot a VM and leave it running, to look around by hand
 #   clean          remove the cache directory
 #
@@ -87,6 +87,16 @@ wait_serial() {
     return 1
 }
 
+# Console log lines are what only the console can have written; lit pixels
+# can be an old frame.
+count() { grep -c -- "$1" "$CACHE/serial.log" 2>/dev/null; true; }
+# wait_count PATTERN N [SECONDS]: wait until N lines match
+wait_count() {
+    local t=${3:-60}
+    for _ in $(seq "$t"); do [ "$(count "$1")" -ge "$2" ] && return 0; sleep 1; done
+    return 1
+}
+
 shot() { # shot NAME: screendump to NAME.ppm and NAME.png
     $TOOLS mon "screendump $CACHE/$1.ppm" && sleep 0.5 && $TOOLS png "$CACHE/$1.ppm" "$CACHE/$1.png"
 }
@@ -116,8 +126,9 @@ tests() {
     echo "== keyboard and login"
     $TOOLS type 'root\n'
     check "root logged in through the console's pty" wait_serial "root login on" 60
-    settle 5; $TOOLS type 'echo AB1\n'; settle 4; shot s2_typed
-    check "typing changed the screen"      bash -c "! $TOOLS same '$CACHE/s1_login.ppm' '$CACHE/s2_typed.ppm'"
+    settle 5; shot s2_before
+    $TOOLS type 'echo AB1\n'; settle 4; shot s2_typed
+    check "typing changed the screen"      bash -c "! $TOOLS same '$CACHE/s2_before.ppm' '$CACHE/s2_typed.ppm'"
 
     echo "== memory"
     $TOOLS type 'rssof 1\n'; wait_serial "VmRSS" 60
@@ -127,11 +138,13 @@ tests() {
     if [ -f "$CACHE/initrd/etc/dkconsole/test.ttf" ]; then
         echo "== TrueType font, changed while the console runs"
         shot t0_psf
-        $TOOLS type 'dkconsole config set font /etc/dkconsole/test.ttf; dkconsole config set font-size 20; cat /etc/dkconsole/config.toml\n'
-        settle 5; shot t1_ttf
-        check "the screen changed after the font did" bash -c "! $TOOLS same '$CACHE/t0_psf.ppm' '$CACHE/t1_ttf.ppm'"
-        check "TrueType text is on the screen"        wait_lit t1_ttf 200 10
-        $TOOLS type 'dkconsole config set font-size 0; echo size reset\n'; settle 4
+        $TOOLS type 'dkconsole config set font /etc/dkconsole/test.ttf; dkconsole config set font-size 20\n'
+        check "the console switched to the TrueType font" wait_count 'tty1.*layout: TrueType font' 1 30
+        check "the new font size was applied"             wait_count 'tty1.*layout: TrueType font, cell [0-9]*x20,' 1 30
+        settle 3; shot t1_ttf
+        check "the screen changed after the font did"     bash -c "! $TOOLS same '$CACHE/t0_psf.ppm' '$CACHE/t1_ttf.ppm'"
+        check "TrueType text is on the screen"            wait_lit t1_ttf 200 10
+        $TOOLS type 'dkconsole config set font-size 0\n'; settle 4
     fi
 
     echo "== report, recovery and the log file"
@@ -146,6 +159,7 @@ tests() {
     echo "== display mode, changed while the console runs"
     $TOOLS type 'dkconsole config set mode 800x600; sleep 1; dkconsole config set mode ""; echo MODE-DONE > /dev/ttyS0\n'
     check "mode change was handled"               wait_serial "MODE-DONE" 60
+    check "the console saw both mode changes"     wait_count 'tty1.*display settings changed' 2 20
     check "an unavailable mode falls back with a warning" bash -c "grep -q 'display has no 800x600' serial.log && grep -q 'display settings changed' serial.log"
     settle 3; shot m1_after
     check "the screen is still alive after it"    wait_lit m1_after 200 30
@@ -162,6 +176,7 @@ tests() {
     $TOOLS mon "sendkey ctrl-alt-f2"; settle 3; $TOOLS type 'root\n'; settle 5
     $TOOLS type 'killcon 1\n'
     check "console 1 died"                 wait_serial "console 1 exited 137" 30
+    check "the new console started a login" wait_count 'tty1.*login started' 2 30
     settle 6; $TOOLS mon "sendkey ctrl-alt-f1"; settle 4
     check "tty1 shows a login again"       wait_lit k1_restart 200 60
 
@@ -183,7 +198,8 @@ case "${1:-all}" in
     test) tests ;;
     boot) boot -vga std; echo "booted; drive it with tools.py from $CACHE (stop with: kill $QPID)"; exit 0 ;;
     clean) rm -rf "$CACHE" ;;
-    all) [ -f "$CACHE/initrd.gz" ] || setup; tests ;;
+    # Always rebuilt: checking an old console proves nothing about this source.
+    all) setup; tests ;;
     *) sed -n '2,15p' "$0"; exit 2 ;;
 esac
 stop
