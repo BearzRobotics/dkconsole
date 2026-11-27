@@ -133,7 +133,7 @@ pub fn save(allocator: std.mem.Allocator, vt: u32, state: State) !void {
     var text: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&text);
     try state.write(&w, bootId(allocator, &ib));
-    sys.makeDir(state_dir);
+    sys.makePrivateDir(state_dir);
     try sys.writeFileAtomic(statePath(&pb, vt), w.buffered());
 }
 

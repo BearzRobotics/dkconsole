@@ -214,6 +214,18 @@ pub fn makeDir(path: []const u8) void {
     _ = mkdir(z.ptr, 0o755);
 }
 
+/// A directory only its owner can look into: the console's runtime state and
+/// logs (SPECS 16.2). One made with a wider mode is narrowed.
+pub fn makePrivateDir(path: []const u8) void {
+    var b: [std.fs.max_path_bytes]u8 = undefined;
+    const z = pathZ(&b, path) orelse return;
+    _ = mkdir(z.ptr, 0o700);
+    const fd = open(z.ptr, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return;
+    _ = fchmod(fd, 0o700);
+    _ = close(fd);
+}
+
 /// Print to standard output or error. Failures are ignored: there is nowhere
 /// left to report them.
 pub fn print(fd: c_int, comptime fmt: []const u8, args: anytype) void {
@@ -253,11 +265,11 @@ pub fn openLogFile(dir: []const u8, vt: u32) void {
     const old = std.fmt.bufPrint(&ob, "{s}.1", .{path}) catch return;
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     var b2: [std.fs.max_path_bytes]u8 = undefined;
-    makeDir(dir);
+    makePrivateDir(dir);
     const pz = pathZ(&b1, path) orelse return;
     const oz = pathZ(&b2, old) orelse return;
     _ = rename(pz.ptr, oz.ptr);
-    log_fd = open(pz.ptr, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, @as(c_uint, 0o644));
+    log_fd = open(pz.ptr, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, @as(c_uint, 0o600));
 }
 
 pub fn parseLevel(text: []const u8) std.log.Level {
@@ -330,4 +342,13 @@ test "writing a file keeps its mode and the link that names it" {
     const text = try readFile(testing.allocator, real, 16);
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("two", text);
+}
+
+test "the runtime directory is private, also if it was not" {
+    var nb: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&nb, "/tmp/dkconsole-private-{d}", .{getpid()}, 0);
+    makeDir(dir);
+    defer _ = std.os.linux.rmdir(dir.ptr);
+    makePrivateDir(dir);
+    try testing.expectEqual(@as(u16, 0o700), modeOf(dir.ptr, true) & 0o7777);
 }
