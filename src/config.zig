@@ -1,6 +1,6 @@
 //! Console settings (SPEC.md 5.11, *Configuration*). One table describes every
-//! key, so the loader, `dkconsole config list/get/set/reset` and the
-//! Settings page all agree on names, defaults and what is valid.
+//! key, so the loader and `dkconsole config list/get/set/reset` agree on
+//! names, defaults and what is valid.
 
 const std = @import("std");
 const termcore = @import("termcore");

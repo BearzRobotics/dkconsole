@@ -1,5 +1,6 @@
-//! A few lines of sample text drawn with the console's own font code, for the
-//! preview on the Settings page (SPEC.md 5.11, *Configuration tools*). It does
+//! A few lines of sample text drawn with the console's own font code, for a
+//! font preview (SPEC.md 5.11, *Configuration tools*); nothing in the program
+//! uses it yet. It does
 //! the same thing the console does for one cell: PSF bits are copied, TrueType
 //! coverage is mixed over the background.
 
