@@ -164,6 +164,14 @@ tests() {
     settle 3; shot m1_after
     check "the screen is still alive after it"    wait_lit m1_after 200 30
 
+    echo "== logout and a new login"
+    $TOOLS type 'exit\n'
+    check "logout was seen"                       wait_count 'tty1.*login ended; starting it again' 1 30
+    check "a second login was started"            wait_count 'tty1.*login started' 2 30
+    settle 3; $TOOLS type 'root\n'
+    check "the next session logs in"              wait_count 'root login on' 2 60
+    settle 4
+
     echo "== VT switching"
     shot v1_tty1
     $TOOLS mon "sendkey ctrl-alt-f2"; settle 4; shot v2_tty2
@@ -176,7 +184,7 @@ tests() {
     $TOOLS mon "sendkey ctrl-alt-f2"; settle 3; $TOOLS type 'root\n'; settle 5
     $TOOLS type 'killcon 1\n'
     check "console 1 died"                 wait_serial "console 1 exited 137" 30
-    check "the new console started a login" wait_count 'tty1.*login started' 2 30
+    check "the new console started a login" wait_count 'tty1.*login started' 3 30
     settle 6; $TOOLS mon "sendkey ctrl-alt-f1"; settle 4
     check "tty1 shows a login again"       wait_lit k1_restart 200 60
 

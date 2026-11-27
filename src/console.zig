@@ -504,16 +504,25 @@ pub const Console = struct {
     // ---- terminal --------------------------------------------------------------------
 
     fn setupTerminal(self: *Console) !void {
+        self.term = try self.newTerminal();
+        self.attachStream();
+    }
+
+    fn newTerminal(self: *Console) !vt.Terminal {
         const a = self.allocator;
         var colors = try termcore.glue.terminalColors(a, self.scheme);
         // The terminal frees the palette once it has taken it.
         errdefer colors.palette.deinit(a);
-        self.term = try vt.Terminal.init(self.tiny_io.io(), a, .{
+        return vt.Terminal.init(self.tiny_io.io(), a, .{
             .cols = self.cols,
             .rows = self.rows,
             .max_scrollback_lines = self.settings.scrollback_lines,
             .colors = colors,
         });
+    }
+
+    /// The parser for `self.term`, answering through this console.
+    fn attachStream(self: *Console) void {
         self.stream = self.term.vtStream();
         var e = vt.TerminalStream.Handler.Effects.readonly;
         e.write_pty = onWritePty;
@@ -523,6 +532,37 @@ pub const Console = struct {
         e.size = onSizeReport;
         e.xtversion = onXtversion;
         self.stream.handler.effects = e;
+    }
+
+    fn deinitTerminal(self: *Console) void {
+        self.state.deinit(self.allocator);
+        self.state = .empty;
+        self.stream.deinit();
+        self.term.deinit(self.allocator);
+    }
+
+    /// Nothing of a session may reach the next one: its screens, scrollback,
+    /// modes, colours and what it copied all go. A new terminal does that;
+    /// escape sequences cannot.
+    fn newSession(self: *Console) !void {
+        const fresh = try self.newTerminal();
+        self.deinitTerminal();
+        self.term = fresh;
+        self.attachStream();
+        self.setPrimary("");
+        self.hold = false;
+        self.selecting = false;
+        self.anchor = null;
+        self.pointer_visible = false;
+        self.last_cursor = null;
+        self.markAll();
+    }
+
+    /// Replaces the paste buffer. It can hold secrets, so what it held is wiped.
+    fn setPrimary(self: *Console, text: []const u8) void {
+        std.crypto.secureZero(u8, self.primary.allocatedSlice());
+        self.primary.clearAndFree(self.allocator);
+        self.primary.appendSlice(self.allocator, text) catch {};
     }
 
     fn fromHandler(handler: *vt.TerminalStream.Handler) *Console {
@@ -559,8 +599,7 @@ pub const Console = struct {
         const self = fromHandler(handler);
         for (write.contents) |c| {
             if (!std.mem.eql(u8, c.mime, "text/plain")) continue;
-            self.primary.clearRetainingCapacity();
-            self.primary.appendSlice(self.allocator, c.data) catch {};
+            self.setPrimary(c.data);
             return;
         }
     }
@@ -659,15 +698,20 @@ pub const Console = struct {
         self.stream.nextSlice(aw.written());
     }
 
-    /// `login` ended: clear the screen and start it again. It never runs a
+    /// `login` ended: discard the session and start it again. It never runs a
     /// shell itself.
     fn loginExited(self: *Console) void {
         log.info("login ended; starting it again", .{});
         self.pty.deinit();
         self.outbox.clear(self.allocator);
         self.login_running = false;
-        self.stream.nextSlice("\x1b[0m\x1b[H\x1b[2J\x1b[3J");
-        self.term.scrollViewport(.bottom);
+        self.newSession() catch |e| {
+            // The old session must not be shown to anyone else. Leaving lets
+            // the init system start a clean console.
+            log.err("cannot make a new terminal ({s}); restarting", .{@errorName(e)});
+            self.quit = true;
+            return;
+        };
         self.startLogin();
     }
 
@@ -1110,8 +1154,69 @@ pub const Console = struct {
             const selection = screen.selection orelse return;
             const text = screen.selectionString(self.allocator, .{ .sel = selection }) catch return;
             defer self.allocator.free(text);
-            self.primary.clearRetainingCapacity();
-            self.primary.appendSlice(self.allocator, text) catch {};
+            self.setPrimary(text);
         }
     }
 };
+
+// ---- tests ------------------------------------------------------------------------
+
+/// A console with a terminal and no kernel devices. Its "login" is /bin/true.
+fn testConsole(a: std.mem.Allocator) !*Console {
+    const c = try a.create(Console);
+    errdefer a.destroy(c);
+    c.* = .{ .allocator = a, .vt_num = 1 };
+    c.settings = config.Settings.resolve(.{}, 1);
+    c.settings.login_program = "/bin/true";
+    c.settings.issue_file = "";
+    c.scheme = termcore.schemes.scheme("campbell");
+    c.renderer.cell_w = 8;
+    c.renderer.cell_h = 16;
+    try c.setupTerminal();
+    return c;
+}
+
+fn destroyTestConsole(c: *Console) void {
+    const a = c.allocator;
+    c.pty.deinit();
+    c.outbox.deinit(a);
+    c.primary.deinit(a);
+    for (&c.damage) |*d| d.rows.deinit(a);
+    c.deinitTerminal();
+    a.destroy(c);
+}
+
+fn screenHas(c: *Console, needle: []const u8) !bool {
+    const text = try c.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    return std.mem.indexOf(u8, text, needle) != null;
+}
+
+test "nothing of a session survives logout" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    const background = c.term.colors.background.get();
+    const foreground = c.term.colors.foreground.get();
+
+    // Output, a clipboard write, then the alternate screen with modes, black
+    // on black, and a synchronized update left open.
+    c.stream.nextSlice("TOPSECRET-FIRST-USER\r\n");
+    c.stream.nextSlice("\x1b]52;c;aHVudGVyMi1jbGlwYm9hcmQ=\x07");
+    try std.testing.expectEqualStrings("hunter2-clipboard", c.primary.items);
+    c.stream.nextSlice("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b]11;#000000\x07\x1b]10;#000000\x07\x1b[?2026h");
+    try std.testing.expect(c.hold);
+    c.selecting = true;
+    c.pointer_visible = true;
+
+    c.loginExited();
+
+    try std.testing.expectEqual(@as(usize, 0), c.primary.items.len);
+    try std.testing.expect(!c.hold and !c.selecting and !c.pointer_visible);
+    try std.testing.expect(!c.term.modes.get(.bracketed_paste));
+    try std.testing.expectEqual(@as(@TypeOf(c.term.flags.mouse_event), .none), c.term.flags.mouse_event);
+    try std.testing.expectEqual(background, c.term.colors.background.get());
+    try std.testing.expectEqual(foreground, c.term.colors.foreground.get());
+    try std.testing.expect(!try screenHas(c, "TOPSECRET"));
+    c.stream.nextSlice("\x1b[?1049l");
+    try std.testing.expect(!try screenHas(c, "TOPSECRET"));
+}
