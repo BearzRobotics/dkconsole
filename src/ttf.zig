@@ -122,7 +122,9 @@ pub const Face = struct {
         // more than a pixel (a fallback face, a double-width character).
         const adv = @as(f32, @floatFromInt(self.font.advance(gid))) * self.scale;
         const wf: f32 = @floatFromInt(w);
-        const x_off: f32 = if (@abs(wf - adv) > 1.0) @floor((wf - adv) / 2) else 0;
+        // A mark with no width of its own reaches back from where its letter
+        // ends.
+        const x_off: f32 = if (adv == 0) wf else if (@abs(wf - adv) > 1.0) @floor((wf - adv) / 2) else 0;
 
         const stride = w + 2;
         const acc = try a.alloc(f32, stride * h);

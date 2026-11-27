@@ -169,8 +169,20 @@ pub const Renderer = struct {
         if (flags.overline) fill(buf, px, py, w, s, fg);
     }
 
+    /// Draws a further code point of a cell, an accent for one, over what is
+    /// there. One no font has is left out: a box would hide the letter.
+    fn drawMark(self: *const Renderer, buf: *const drm.Buffer, px: u32, py: u32, cp: u21, cells_wide: u32, fg: u32, bold: bool) void {
+        const w = self.cell_w * cells_wide;
+        const glyph = self.glyphFor(cp, cells_wide > 1, bold) orelse return;
+        switch (glyph) {
+            .bitmap => |b| self.blit(buf, px, py, b.font, b.bitmap, fg, bold),
+            .coverage => |c| self.blend(buf, px, py, c, w, fg, null),
+        }
+    }
+
     /// Mix `fg` over `bg` by an 8-bit coverage bitmap `w` pixels wide.
-    fn blend(self: *const Renderer, buf: *const drm.Buffer, px: u32, py: u32, cov: []const u8, w: u32, fg: u32, bg: u32) void {
+    /// A null `bg` mixes over the pixels already there.
+    fn blend(self: *const Renderer, buf: *const drm.Buffer, px: u32, py: u32, cov: []const u8, w: u32, fg: u32, bg: ?u32) void {
         var gy: u32 = 0;
         while (gy < self.cell_h) : (gy += 1) {
             const y = py + gy;
@@ -181,7 +193,7 @@ pub const Renderer = struct {
                 if (c == 0) continue;
                 const x = px + @as(u32, @intCast(gx));
                 if (x >= buf.width) break;
-                row[x] = if (c == 255) fg else mix(bg, fg, c);
+                row[x] = if (c == 255) fg else mix(bg orelse row[x], fg, c);
             }
         }
     }
@@ -239,6 +251,7 @@ pub const Renderer = struct {
         const cells = row_data.items(.cells)[y];
         const selection = row_data.items(.selection)[y];
         const raws = cells.items(.raw);
+        const graphemes = cells.items(.grapheme);
         const styles = cells.items(.style);
         const py = origin_y + @as(u32, @intCast(y)) * self.cell_h;
         const n = @min(raws.len, state.cols);
@@ -263,6 +276,9 @@ pub const Renderer = struct {
             const wide: u32 = if (raw.wide == .wide) 2 else 1;
             const cx = origin_x + @as(u32, @intCast(x)) * self.cell_w;
             self.drawCell(buf, cx, py, cellCodepoint(raw), wide, pack(colors.fg), pack(colors.bg), style.flags);
+            if (raw.content_tag == .codepoint_grapheme and !style.flags.invisible) {
+                for (graphemes[x]) |mark| self.drawMark(buf, cx, py, mark, wide, pack(colors.fg), style.flags.bold);
+            }
             if (is_cursor) {
                 const cc = pack(cursor.?.color);
                 const s = self.scale;
@@ -421,4 +437,41 @@ test "a character no font has is drawn as a box, and inverse swaps colours" {
     const inv = try drawScreen(a, "\x1b[7m ", 4, 1, 1);
     try testing.expectEqual(@as(u32, 8 * 16), countPixels(&inv.buf, 0, 0, 8, 16, fg));
     try testing.expectEqual(@as(u32, 0), countPixels(&inv.buf, 0, 0, 8, 16, bg));
+}
+
+extern fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern fn fread(buf: [*]u8, size: usize, n: usize, f: *anyopaque) usize;
+extern fn fclose(f: *anyopaque) c_int;
+
+// The built-in font has no combining marks, so this needs a TrueType one.
+test "a combining mark is drawn over its letter" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const file = fopen("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "rb") orelse return error.SkipZigTest;
+    defer _ = fclose(file);
+    const bytes = try a.alloc(u8, 4 << 20);
+    var face = try ttf.Face.init(a, bytes[0..fread(bytes.ptr, 1, bytes.len, file)], 32);
+    var faces = [_]*ttf.Face{&face};
+    const r = Renderer.initMixed(&.{}, &faces, true, 1);
+
+    var pixels: [2]u32 = undefined;
+    for ([_][]const u8{ "e", "e\u{301}" }, &pixels) |input, *count| {
+        var io: vt.TinyIo = .init;
+        var term = try vt.Terminal.init(io.io(), a, .{ .cols = 4, .rows = 1, .colors = try termcore.glue.terminalColors(a, termcore.schemes.scheme("campbell")) });
+        // In tests the terminal's pages come from the leak-checking allocator.
+        defer term.deinit(a);
+        var stream = term.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(input);
+        var state: vt.RenderState = .empty;
+        defer state.deinit(a);
+        try state.update(a, &term);
+        const buf = try fakeBuffer(a, 4 * r.cell_w, r.cell_h);
+        r.drawRow(&buf, 0, 0, &state, 0, null);
+        const bg = pack(state.colors.background);
+        // Everything in the first cell that is not background.
+        count.* = r.cell_w * r.cell_h - countPixels(&buf, 0, 0, r.cell_w, r.cell_h, bg);
+    }
+    try testing.expect(pixels[1] > pixels[0] + 3);
 }
