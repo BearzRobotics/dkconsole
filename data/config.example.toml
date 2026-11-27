@@ -36,7 +36,8 @@ login-program = ""
 issue-file = "/etc/issue"
 # campbell, one-half-dark, solarized-dark or solarized-light
 colors = "campbell"
-# Lines kept for Shift+PageUp.
+# Lines kept for Shift+PageUp; 0 keeps none. History is dropped a block at a
+# time, so the number kept can be a few hundred more or less.
 scrollback-lines = 2000
 # Blinking cursors blink only on the VT you are looking at. Off wakes the
 # machine less.
@@ -53,5 +54,6 @@ fallback = "/sbin/agetty --noclear tty%N linux"
 # input devices, login) and every problem; debug adds each VT switch and each
 # step behind it. Applies at once.
 log-level = "info"
-# Megabytes of image data per console (kitty graphics; not yet used).
+# The most image data (kitty graphics) the terminal stores, in megabytes; 0
+# turns the protocol off. The console does not draw images yet.
 image-memory = 32

@@ -187,6 +187,8 @@ pub const Console = struct {
     docs_loaded: bool = false,
     settings: config.Settings = undefined,
     conf_watch: c_int = -1,
+    /// The watch is on the parent: the settings directory does not exist yet.
+    conf_watch_parent: bool = false,
 
     // kernel interfaces
     vtdev: vtmod.Vt = undefined,
@@ -404,17 +406,32 @@ pub const Console = struct {
     }
 
     fn watchConfig(self: *Console) void {
-        const path = configtool.etcPath();
-        const dir = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[0..i] else ".";
-        var b: [std.fs.max_path_bytes]u8 = undefined;
-        const z = sys.pathZ(&b, dir) orelse return;
         self.conf_watch = inotify_init1(sys.O_CLOEXEC | sys.O_NONBLOCK);
         if (self.conf_watch < 0) return;
+        self.addConfigWatch(configtool.etcPath());
+    }
+
+    /// Watches the directory of the settings file at `path`. On a new install
+    /// it may not exist yet: then its parent is watched until it does.
+    fn addConfigWatch(self: *Console, path: []const u8) void {
+        const dir = parentDir(path);
+        var b: [std.fs.max_path_bytes]u8 = undefined;
+        const z = sys.pathZ(&b, dir) orelse return;
         // IN_CLOSE_WRITE | IN_MOVED_TO: the tool writes through a rename.
-        if (inotify_add_watch(self.conf_watch, z.ptr, 0x8 | 0x80) < 0) {
-            _ = sys.close(self.conf_watch);
-            self.conf_watch = -1;
+        if (inotify_add_watch(self.conf_watch, z.ptr, 0x8 | 0x80) >= 0) {
+            self.conf_watch_parent = false;
+            return;
         }
+        var pb: [std.fs.max_path_bytes]u8 = undefined;
+        const pz = sys.pathZ(&pb, parentDir(dir)) orelse return;
+        // IN_CREATE | IN_MOVED_TO: the directory appearing.
+        self.conf_watch_parent = inotify_add_watch(self.conf_watch, pz.ptr, 0x100 | 0x80) >= 0;
+        if (!self.conf_watch_parent) log.warn("{s}: cannot watch for changes", .{dir});
+    }
+
+    fn parentDir(path: []const u8) []const u8 {
+        const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return ".";
+        return if (i == 0) "/" else path[0..i];
     }
 
     // ---- display -------------------------------------------------------------------
@@ -657,9 +674,30 @@ pub const Console = struct {
         return vt.Terminal.init(self.tiny_io.io(), a, .{
             .cols = self.cols,
             .rows = self.rows,
+            // Left alone, the byte limit defaults to 10,000 and cuts the
+            // history to a few hundred lines whatever the line limit says.
+            .max_scrollback_bytes = scrollbackBytes(self.settings.scrollback_lines),
             .max_scrollback_lines = self.settings.scrollback_lines,
+            .kitty_image_storage_limit = self.imageLimit(),
             .colors = colors,
         });
+    }
+
+    /// The line limit alone bounds the history. Only zero needs the byte
+    /// limit: with a line limit of zero a page would still be kept.
+    fn scrollbackBytes(lines: u32) ?usize {
+        return if (lines == 0) 0 else null;
+    }
+
+    fn imageLimit(self: *const Console) usize {
+        return @as(usize, self.settings.image_memory_mb) << 20;
+    }
+
+    /// Settings of a running terminal that can change under it.
+    fn applyTerminalLimits(self: *Console) void {
+        self.term.setScrollbackMaxBytes(scrollbackBytes(self.settings.scrollback_lines));
+        self.term.setScrollbackMaxLines(self.settings.scrollback_lines);
+        self.term.setKittyGraphicsSizeLimit(self.allocator, self.imageLimit());
     }
 
     /// The parser for `self.term`, answering through this console.
@@ -1007,6 +1045,8 @@ pub const Console = struct {
     fn reloadConfig(self: *Console, dirty: *bool) void {
         var buf: [512]u8 align(4) = undefined;
         while (sys.read(self.conf_watch, &buf, buf.len) > 0) {}
+        // The file may be there already by the time its directory is seen.
+        if (self.conf_watch_parent) self.addConfigWatch(configtool.etcPath());
         // The strings of the old settings live in documents that loadSettings
         // frees, so keep copies of the ones compared below.
         const a = self.allocator;
@@ -1040,6 +1080,7 @@ pub const Console = struct {
             self.releaseDisplayResources();
             self.acquire();
         }
+        self.applyTerminalLimits();
         self.term.colors.background = .init(termcore.glue.rgb(self.scheme.background));
         self.term.colors.foreground = .init(termcore.glue.rgb(self.scheme.foreground));
         self.term.colors.palette.changeDefault(self.allocator, termcore.glue.palette(self.scheme)) catch {};
@@ -1684,4 +1725,71 @@ test "a selection whose start is gone is dropped, not copied" {
     c.handleButton(evdev.BTN_LEFT, true, &dirty);
     c.loginExited();
     try std.testing.expect(c.anchor == null);
+}
+
+fn historyLines(c: *Console) !usize {
+    const text = try c.term.screens.active.dumpStringAlloc(std.testing.allocator, .{ .screen = .{} });
+    defer std.testing.allocator.free(text);
+    return std.mem.count(u8, text, "\n") + 1;
+}
+
+fn printLines(c: *Console, n: usize) !void {
+    var line: [32]u8 = undefined;
+    for (0..n) |i| c.stream.nextSlice(try std.fmt.bufPrint(&line, "line {d}\r\n", .{i}));
+}
+
+test "scrollback-lines decides how much history is kept, also while running" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.cols = 160;
+    c.rows = 50;
+    c.settings.scrollback_lines = 5000;
+    try c.newSession();
+    try printLines(c, 20_000);
+    // History is dropped a page at a time (some hundreds of lines at this
+    // width), so the limit is approximate. 10,000 bytes allowed under 600.
+    try std.testing.expect(try historyLines(c) > 4000);
+    // History is dropped a page at a time, so the limit is approximate.
+    try std.testing.expect(try historyLines(c) < 7000);
+
+    c.settings.scrollback_lines = 0;
+    c.applyTerminalLimits();
+    try std.testing.expect(try historyLines(c) <= c.rows);
+    try printLines(c, 1000);
+    try std.testing.expect(try historyLines(c) <= c.rows);
+
+    c.settings.scrollback_lines = 3000;
+    c.applyTerminalLimits();
+    try printLines(c, 20_000);
+    try std.testing.expect(try historyLines(c) > 2000);
+    try std.testing.expect(try historyLines(c) < 4000);
+}
+
+test "a settings directory created later is watched" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    var base: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&base, "/tmp/dkconsole-watch-{d}", .{std.os.linux.getpid()}, 0);
+    sys.makeDir(root);
+    defer _ = std.os.linux.rmdir(root.ptr);
+    var pb: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, "{s}/etc/config.toml", .{root});
+    c.conf_watch = inotify_init1(sys.O_CLOEXEC | sys.O_NONBLOCK);
+    defer _ = sys.close(c.conf_watch);
+    c.addConfigWatch(path);
+    try std.testing.expect(c.conf_watch_parent);
+
+    var db: [96]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&db, "{s}/etc", .{root}, 0);
+    sys.makeDir(dir);
+    defer _ = std.os.linux.rmdir(dir.ptr);
+    var events: [512]u8 align(4) = undefined;
+    try std.testing.expect(sys.read(c.conf_watch, &events, events.len) > 0);
+    c.addConfigWatch(path);
+    try std.testing.expect(!c.conf_watch_parent);
+    var fb: [96]u8 = undefined;
+    const file = try std.fmt.bufPrintSentinel(&fb, "{s}", .{path}, 0);
+    try sys.writeFileAtomic(path, "[console]\n");
+    defer _ = sys.unlink(file.ptr);
+    try std.testing.expect(sys.read(c.conf_watch, &events, events.len) > 0);
 }
