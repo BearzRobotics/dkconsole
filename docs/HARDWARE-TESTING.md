@@ -59,13 +59,15 @@ verdict: "screen went black for 3 s then came back" is more useful than "VT swit
 | 4 | Resolution | Native resolution by default; `dkconsole config set mode 1920x1080` switches live |
 | 5 | Several monitors | The first connected one is used; `display = "DP-2"` picks another |
 | 6 | Keyboard | Layout matches the system's (`loadkeys`/kbd keymap), Shift+PageUp scrolls, key repeat works |
-| 7 | Mouse | Selecting text with the mouse and middle-click paste, if used |
+| 7 | Mouse | Selecting text with the mouse and middle-click paste, if used. On a touchpad, a finger moves the pointer and only the pad's button clicks |
 | 8 | VT switch away and back | Screen returns intact, input still works; no flicker loop |
 | 9 | Another VT running a compositor (labwc/seatd, Xorg) | Compositor starts, and Ctrl+Alt+F-key brings dkconsole back |
-| 10 | Log out | Screen is cleared, banner shown again, a fresh `login:` |
+| 10 | Log out | Screen is cleared, banner shown again, a fresh `login:`; Shift+Insert pastes nothing |
 | 11 | Suspend and resume (laptops) | Console is visible after resume |
 | 12 | Display hotplug | Unplug and replug the monitor, then switch VT away and back |
 | 13 | `kill -9` the console | It restarts; after three crashes in a minute the VT gets agetty |
+| 14 | Caps Lock across VT switches | It stays as you left it (the light is not driven) |
+| 15 | Unplug a keyboard while holding Shift | Shift does not stay down |
 
 Check 9 is the one the spec calls a required experiment: launching a compositor from the
 console's shell is not guaranteed to work. Note exactly what you ran and what happened.
@@ -106,10 +108,13 @@ VT switch and each step of taking and releasing the display.
 | `drm: driver amdgpu 3.64.0` ... `drm: connector 399 HDMI-A-1: connected` | What the kernel offers |
 | `display: connector 399 (HDMI-A-1), 1360x768@60` | What the console chose |
 | `display has no 1920x1080 ... mode; using the default one` | `mode` is not offered by that display |
-| `no connected display is named DP-9` | `display` does not match any connector name |
+| `no connected display is named DP-9` | `display` does not match any connector name; the first one is used |
+| `acquire: trying the display again in 100 ms` | Taking the display failed; it is retried, up to 1.6 s apart |
+| `acquire: giving up on the display` | Every retry failed: the VT goes to the fallback getty |
+| `login failed 5 times in a row; giving up` | No login could be kept running: the VT goes to the fallback getty |
 | `acquire: 1360x768@60` | The console took the display (VT came to the front) |
 | `no usable display (see the drm lines above); using the plain getty` | Fell back to agetty at start |
-| `too many recent crashes` | The three-start latch triggered |
+| `too many recent crashes` | The latch triggered: three failures within a minute |
 | `login started: /bin/login, pid N` | Login is running |
 
 ## If the console will not start, or keeps failing
@@ -121,12 +126,15 @@ sudo dkconsole recovery status              # crash record per VT: recent failur
 sudo dkconsole recovery reset --vt 5        # clear it (root); a running console is not touched
 ```
 
-After three starts inside a minute, a VT goes to agetty and stays there until the counter is
-cleared or you reboot. `dkconsole report` shows the counters too.
+After the third failure within a minute, a VT goes to agetty and stays there until the record
+is cleared or you reboot. Stopping the service is not a failure. `dkconsole report` shows the
+records too.
 
 To put the VT back as it was, stop the service (`systemctl stop dkconsole@5`) and start your
-usual getty. If a VT is stuck on a blank screen with no keyboard, Ctrl+Alt+F-key to another VT
-and the console restores text mode when it is stopped.
+usual getty. Switching away with Ctrl+Alt+F-key works whenever the console holds the VT, also
+when it cannot draw on it. If a VT ever shows a blank screen where that does nothing, the console
+process is gone or stuck: over SSH, `systemctl restart dkconsole@5` (every start restores the VT
+first), and please report it.
 
 ## Settings that matter on real hardware
 

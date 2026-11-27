@@ -3,8 +3,8 @@
 A text console for Linux virtual terminals that replaces `agetty`: it draws a login prompt
 on the display (KMS/DRM, no X or Wayland), reads the keyboard from evdev, runs the login
 program on a pseudo-terminal and shows its output with a real terminal emulator
-(DKTermCore, on libghostty-vt). If it cannot start, or crashes three times in a row, it
-hands the VT to a plain text getty.
+(DKTermCore, on libghostty-vt). If it cannot start, cannot take the display, cannot start
+a login, or crashes three times within a minute, it hands the VT to a plain text getty.
 
 DKConsole is independent of the DKDE desktop. It builds with Zig 0.17.1 and no system libraries.
 The specification is `ai/DKCONSOLE-SPEC.md`.
@@ -27,7 +27,7 @@ TOML, read with toml-zig: `/etc/dkconsole/config.toml` (`$DKCONSOLE_CONFIG` over
 with `[console]` for every VT and `[vt.N]` to override keys for one. The shipped defaults and the
 meaning of every key are in `data/config.example.toml` (installed to
 `share/dkconsole/config.example.toml`). Changes apply to running consoles at once, except
-`fallback`. The ones people reach for first: `font`/`font-size`/`scale`, `mode` (a display
+`fallback`, which is read when a console starts. The ones people reach for first: `font`/`font-size`/`scale`, `mode` (a display
 resolution such as `1920x1080@60`), `display` (which connector), `issue-file` and `login-program`.
 
 ```
@@ -39,9 +39,17 @@ dkconsole config fonts                    fonts it can use on this system
 ```
 
 Writing `config.toml` keeps unknown keys and your comments (toml-zig 0.2.0 or later; comments
-inside arrays and inline tables are the one exception). The long commented documentation lives
-in `config.example.toml`. A file that is not
-valid TOML is ignored and the console keeps working with defaults.
+inside arrays and inline tables are the one exception), and the file's mode, owner and symlink.
+The long commented documentation lives in `config.example.toml`.
+
+If the file is not valid TOML or cannot be read, `config set` and `config reset` change nothing
+and say what is wrong, with the line and column; `config list` and `config get` say so and exit
+with status 1. A running console keeps the settings it had; one that is starting uses the
+defaults.
+
+`color-scheme`, `cursor-style`, `scrollback-lines` and `osc52` are the settings shared with
+DKTerm. `colors`, the earlier name of `color-scheme`, still works. `osc52` is `false` unless you
+set it, so only what you select with the mouse can be pasted.
 
 ## Diagnostics
 
@@ -52,7 +60,14 @@ dkconsole recovery reset --vt N           clear it (root); does not disturb a ru
 dkconsole version
 ```
 
-The console logs to standard error (your init system's log) and to `/run/dkconsole/ttyN.log`.
+The console logs to standard error (your init system's log) and to `/run/dkconsole/ttyN.log`
+(1 MiB, then it moves to `ttyN.log.1` and starts over). `/run/dkconsole` is readable by root
+only, so run `report` and `recovery status` as root.
+
+A start that does not end cleanly (a crash or `kill -9`) counts as a failure, and so does
+falling back because something did not work. Stopping or restarting the service does not.
+After the third failure within 60 s every start on that VT goes to the fallback getty until
+reboot or `recovery reset`.
 `/etc/issue` escapes: `\n \l \s \r \m \v \o \O \d \t \u \U \S \S{VAR} \4 \4{if} \6 \6{if} \e`.
 See `docs/HARDWARE-TESTING.md` before trying it on real hardware.
 
@@ -60,8 +75,10 @@ See `docs/HARDWARE-TESTING.md` before trying it on real hardware.
 
 `scripts/qemu-console-test/run` boots the static console in QEMU (no root, no KVM needed, Debian
 or Ubuntu for the kernel and busybox) and checks: login on a DRM display, typing, idle memory,
-a TrueType font changed while it runs, VT switching, recovery from `kill -9`, the fallback after
-repeated crashes, the fallback when there is no display, `dkconsole report` and a display-mode change while running. Screenshots of each step are kept
+a TrueType font changed while it runs, logout and a second login, VT switching, recovery from
+`kill -9`, the fallback after repeated crashes, the fallback when there is no display,
+`dkconsole report`, and a display-mode and connector change while running. It rebuilds the
+console each time. Screenshots of each step are kept
 in `~/.cache/dkconsole-qemu`.
 
 ```
@@ -75,10 +92,17 @@ See the spec's open questions: image protocols, launching a Wayland session from
 
 ## Status
 
-0.2.0. The QEMU test passes all 26 checks on a Ubuntu 7.0 kernel with a simpledrm display
-(`scripts/qemu-console-test/run`). It has not been run on real hardware yet; start with
-`docs/HARDWARE-TESTING.md`.
+0.3.0 (see `CHANGELOG.md`). The QEMU test passes all 35 checks on a Ubuntu 7.0 kernel with a
+simpledrm display (`scripts/qemu-console-test/run`). It has not been run on real hardware yet;
+start with `docs/HARDWARE-TESTING.md`.
 
 Release tarballs: `dkconsole-VERSION.tar.gz` is the source (dependencies are fetched by `zig build`);
 `dkconsole-VERSION-vendored.tar.gz` also holds every dependency in `zig-pkg/`, so it builds with no
 network (`zig build --system zig-pkg`).
+
+## License
+
+DKConsole is under the MIT License in `LICENSE`. DKTermCore (dkterm), which is built into the
+program, is `LGPL-2.0-or-later` from 0.2.0 on: if you distribute a binary, its terms apply to
+that part. toml-zig and libghostty-vt are MIT. The Terminus font has its own license, in
+`third_party/terminus`.
