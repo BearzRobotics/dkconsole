@@ -39,7 +39,7 @@
 
 - **DKC-040 (MUST):** Use system-owned `/etc/dkconsole/config.toml` with per-VT overrides; do not load untrusted home-directory configuration before login.
 - **DKC-041 (MUST):** Validate configuration, write atomically, and use safe defaults or last known-good runtime settings for malformed input.
-- **DKC-044 (MUST):** Parse and write TOML with `toml-zig` (`~/de/toml-zig`, pinned in `build.zig.zon`). No INI reader, no GLib/GKeyFile and no DKDE configuration module. Frontend-neutral terminal keys (`color-scheme`, `cursor-style`, `scrollback-lines`, `osc52`, `command`, `directory`) are read through `termcore.options` from DKTermCore, which uses the same `toml-zig`.
+- **DKC-044 (MUST):** Parse and write TOML with `toml-zig` (`~/de/toml-zig`, pinned in `build.zig.zon`). No INI reader, no GLib/GKeyFile and no DKDE configuration module. Frontend-neutral terminal keys (`color-scheme`, `cursor-style`, `scrollback-lines`, `osc52`, `command`, `directory`) are read through `termcore.options` from DKTermCore, which uses the same `toml-zig`. `command` and `directory` are not acted on, since DKConsole runs only `login` (see the specification); setting them logs a warning. `colors` remains an accepted older name for `color-scheme`.
 - **DKC-042 (MUST):** Never invoke `sh -c` for configured login/getty commands, and never log passwords, keystrokes or terminal escape payloads.
 - **DKC-043 (MUST):** Bound memory for scrollback, escape sequences, clipboard and images; malformed terminal data must not break the login screen.
 

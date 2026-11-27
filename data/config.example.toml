@@ -34,8 +34,11 @@ login-program = ""
 # The banner shown before each login. \n \l \s \r \m \v \o \d \t \u \U \S \S{VAR}
 # and \e are expanded; a missing file shows nothing. Empty turns the banner off.
 issue-file = "/etc/issue"
-# campbell, one-half-dark, solarized-dark or solarized-light
-colors = "campbell"
+# campbell, one-half-dark, solarized-dark or solarized-light. The older name
+# `colors` still works.
+color-scheme = "campbell"
+# The cursor's shape unless a program chooses one: block, bar or underline.
+cursor-style = "block"
 # Lines kept for Shift+PageUp; 0 keeps none. History is dropped a block at a
 # time, so the number kept can be a few hundred more or less.
 scrollback-lines = 2000

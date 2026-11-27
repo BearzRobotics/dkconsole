@@ -213,6 +213,25 @@ fn save(allocator: std.mem.Allocator, doc: *ini.Document) u8 {
     return 0;
 }
 
+/// Sets `key` under its present name, in place of its older one. False when
+/// the file already says so, under either name.
+fn assign(doc: *ini.Document, group: []const u8, key: *const config.Key, value: []const u8) !bool {
+    if (key.alias) |old| {
+        if (doc.get(group, key.name) == null) {
+            if (doc.get(group, old)) |v| if (std.mem.eql(u8, v, value)) return false;
+        }
+        const removed = doc.remove(group, old);
+        return try doc.set(group, key.name, value) or removed;
+    }
+    return doc.set(group, key.name, value);
+}
+
+fn unassign(doc: *ini.Document, group: []const u8, key: *const config.Key) bool {
+    const removed = doc.remove(group, key.name);
+    const old_removed = if (key.alias) |old| doc.remove(group, old) else false;
+    return removed or old_removed;
+}
+
 fn set(allocator: std.mem.Allocator, etc: *ini.Document, vt: u32, name: []const u8, value: []const u8) u8 {
     const k = config.find(name) orelse return unknownKey(name);
     if (deepCheck(allocator, k, value)) |why| {
@@ -220,7 +239,7 @@ fn set(allocator: std.mem.Allocator, etc: *ini.Document, vt: u32, name: []const 
         return 1;
     }
     var gbuf: [24]u8 = undefined;
-    const changed = etc.set(groupFor(&gbuf, vt), name, value) catch {
+    const changed = assign(etc, groupFor(&gbuf, vt), k, value) catch {
         sys.print(err_fd, "dkconsole: out of memory\n", .{});
         return 1;
     };
@@ -229,9 +248,9 @@ fn set(allocator: std.mem.Allocator, etc: *ini.Document, vt: u32, name: []const 
 }
 
 fn reset(allocator: std.mem.Allocator, etc: *ini.Document, vt: u32, name: []const u8) u8 {
-    _ = config.find(name) orelse return unknownKey(name);
+    const k = config.find(name) orelse return unknownKey(name);
     var gbuf: [24]u8 = undefined;
-    if (!etc.remove(groupFor(&gbuf, vt), name)) return 0;
+    if (!unassign(etc, groupFor(&gbuf, vt), k)) return 0;
     return save(allocator, etc);
 }
 

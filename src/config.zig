@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const termcore = @import("termcore");
+const toml = @import("toml");
 const ini = @import("tomlcfg.zig");
 const drm = @import("drm.zig");
 
@@ -13,6 +14,8 @@ pub const Kind = enum { string, int, boolean, list };
 
 pub const Key = struct {
     name: []const u8,
+    /// An older name that still works.
+    alias: ?[]const u8 = null,
     kind: Kind,
     default: []const u8,
     /// Inclusive limits for `.int`.
@@ -33,7 +36,10 @@ pub const keys = [_]Key{
     .{ .name = "display", .kind = .string, .default = "" },
     .{ .name = "login-program", .kind = .string, .default = "" },
     .{ .name = "issue-file", .kind = .string, .default = "/etc/issue" },
-    .{ .name = "colors", .kind = .string, .default = "campbell", .choices = &color_schemes },
+    // `color-scheme`, `cursor-style`, `scrollback-lines` and `osc52` are the
+    // terminal settings DKTerm shares; see `Settings.resolve`.
+    .{ .name = "color-scheme", .alias = "colors", .kind = .string, .default = "campbell", .choices = &color_schemes },
+    .{ .name = "cursor-style", .kind = .string, .default = "block", .choices = &.{ "block", "bar", "underline" } },
     .{ .name = "scrollback-lines", .kind = .int, .default = "2000", .min = 0, .max = 100000 },
     .{ .name = "cursor-blink", .kind = .boolean, .default = "false" },
     .{ .name = "fallback", .kind = .string, .default = "/sbin/agetty --noclear tty%N linux" },
@@ -45,7 +51,23 @@ pub const keys = [_]Key{
 };
 
 pub fn find(name: []const u8) ?*const Key {
-    for (&keys) |*k| if (std.mem.eql(u8, k.name, name)) return k;
+    for (&keys) |*k| {
+        if (std.mem.eql(u8, k.name, name)) return k;
+        if (k.alias) |a| if (std.mem.eql(u8, a, name)) return k;
+    }
+    return null;
+}
+
+/// Shared terminal settings this console does not act on: it runs `login`,
+/// never a shell or a command of the user's choosing.
+pub const unused_shared_keys = [_][]const u8{ "command", "directory" };
+
+/// `group`'s value of `key` under its name or its older one, if it passes.
+fn valid(doc: *const ini.Document, group_name: []const u8, key: *const Key) ?[]const u8 {
+    for ([_]?[]const u8{ key.name, key.alias }) |name| {
+        const v = doc.get(group_name, name orelse continue) orelse continue;
+        if (check(key, v) == null) return v;
+    }
     return null;
 }
 
@@ -93,13 +115,33 @@ pub fn lookup(layers: Layers, vt: u32, key: *const Key) Value {
     var gbuf: [24]u8 = undefined;
     const vt_group = std.fmt.bufPrint(&gbuf, "vt:{d}", .{vt}) catch "";
     if (layers.etc) |d| {
-        if (vt != 0) if (d.get(vt_group, key.name)) |v| if (check(key, v) == null) return .{ .text = v, .source = .vt };
-        if (d.get(group, key.name)) |v| if (check(key, v) == null) return .{ .text = v, .source = .etc };
+        if (vt != 0) if (valid(d, vt_group, key)) |v| return .{ .text = v, .source = .vt };
+        if (valid(d, group, key)) |v| return .{ .text = v, .source = .etc };
     }
     if (layers.defaults) |d| {
-        if (d.get(group, key.name)) |v| if (check(key, v) == null) return .{ .text = v, .source = .system_defaults };
+        if (valid(d, group, key)) |v| return .{ .text = v, .source = .system_defaults };
     }
     return .{ .text = key.default, .source = .default };
+}
+
+/// Reads the shared terminal settings with DKTermCore's reader, so that both
+/// terminals take them to mean the same. The values, already layered and
+/// checked here, are handed to it as the TOML they stand for.
+fn sharedOptions(color_scheme: []const u8, cursor: []const u8, scrollback: u32, osc52: bool) termcore.options.Options {
+    // This console's own defaults, for anything that cannot be passed on.
+    const base: termcore.options.Options = .{ .color_scheme = "campbell", .scrollback_lines = 2000, .osc52 = false };
+    var memory: [8192]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&memory);
+    var doc = toml.Document.init(fixed.allocator()) catch return base;
+    defer doc.deinit();
+    doc.set(&.{"color-scheme"}, .{ .string = color_scheme }) catch return base;
+    doc.set(&.{"cursor-style"}, .{ .string = cursor }) catch return base;
+    doc.set(&.{"scrollback-lines"}, .{ .integer = scrollback }) catch return base;
+    doc.set(&.{"osc52"}, .{ .boolean = osc52 }) catch return base;
+    var read = termcore.options.Options.fromTableOver(doc.root, base);
+    // Its strings live in `doc`.
+    read.color_scheme = base.color_scheme;
+    return read;
 }
 
 /// Typed, resolved settings for one VT.
@@ -113,7 +155,8 @@ pub const Settings = struct {
     display: []const u8,
     login_program: []const u8,
     issue_file: []const u8,
-    colors: []const u8,
+    color_scheme: []const u8,
+    cursor: termcore.options.CursorStyle,
     scrollback_lines: u32,
     cursor_blink: bool,
     osc52: bool,
@@ -130,6 +173,7 @@ pub const Settings = struct {
                 return std.fmt.parseInt(u32, get(l, v, name), 10) catch 0;
             }
         };
+        const shared = sharedOptions(L.get(layers, vt, "color-scheme"), L.get(layers, vt, "cursor-style"), L.int(layers, vt, "scrollback-lines"), ini.parseBool(L.get(layers, vt, "osc52")) orelse false);
         return .{
             .font = L.get(layers, vt, "font"),
             .fallback_fonts = L.get(layers, vt, "fallback-fonts"),
@@ -140,10 +184,12 @@ pub const Settings = struct {
             .display = L.get(layers, vt, "display"),
             .login_program = L.get(layers, vt, "login-program"),
             .issue_file = L.get(layers, vt, "issue-file"),
-            .colors = L.get(layers, vt, "colors"),
-            .scrollback_lines = L.int(layers, vt, "scrollback-lines"),
+            // A name `check` has passed, so it is the one `shared` read.
+            .color_scheme = L.get(layers, vt, "color-scheme"),
+            .cursor = shared.cursor,
+            .scrollback_lines = shared.scrollback_lines,
             .cursor_blink = ini.parseBool(L.get(layers, vt, "cursor-blink")) orelse false,
-            .osc52 = ini.parseBool(L.get(layers, vt, "osc52")) orelse false,
+            .osc52 = shared.osc52,
             .fallback = L.get(layers, vt, "fallback"),
             .image_memory_mb = L.int(layers, vt, "image-memory"),
             .log_level = L.get(layers, vt, "log-level"),
@@ -167,7 +213,7 @@ const testing = std.testing;
 test "defaults when there is no file" {
     const s = Settings.resolve(.{}, 1);
     try testing.expectEqual(@as(u32, 2000), s.scrollback_lines);
-    try testing.expectEqualStrings("campbell", s.colors);
+    try testing.expectEqualStrings("campbell", s.color_scheme);
     try testing.expect(!s.cursor_blink);
     try testing.expectEqual(@as(u32, 1), s.scale);
 }
@@ -194,7 +240,7 @@ test "invalid values fall back instead of failing" {
     defer etc.deinit();
     const s = Settings.resolve(.{ .etc = &etc }, 1);
     try testing.expectEqual(@as(u32, 1), s.scale);
-    try testing.expectEqualStrings("campbell", s.colors);
+    try testing.expectEqualStrings("campbell", s.color_scheme);
     try testing.expect(!s.cursor_blink);
     try testing.expectEqual(@as(u32, 2000), s.scrollback_lines);
 }
@@ -221,4 +267,29 @@ test "fallback expands the vt number" {
     defer aw.deinit();
     try expandFallback(&aw.writer, "/sbin/agetty --noclear tty%N linux", 3);
     try testing.expectEqualStrings("/sbin/agetty --noclear tty3 linux", aw.written());
+}
+
+test "the shared terminal settings are read as DKTerm reads them" {
+    var etc = try ini.Document.parse(testing.allocator, "[console]\ncolor-scheme = \"one-half-dark\"\ncursor-style = \"underline\"\nscrollback-lines = 321\nosc52 = true\n");
+    defer etc.deinit();
+    const s = Settings.resolve(.{ .etc = &etc }, 1);
+    try testing.expectEqualStrings("one-half-dark", s.color_scheme);
+    try testing.expectEqual(termcore.options.CursorStyle.underline, s.cursor);
+    try testing.expectEqual(@as(u32, 321), s.scrollback_lines);
+    try testing.expect(s.osc52);
+    const d = Settings.resolve(.{}, 1);
+    try testing.expectEqual(termcore.options.CursorStyle.block, d.cursor);
+    try testing.expect(!d.osc52);
+}
+
+test "the older name colors still works, and color-scheme beats it" {
+    var old = try ini.Document.parse(testing.allocator, "[console]\ncolors = \"solarized-dark\"\n");
+    defer old.deinit();
+    try testing.expectEqualStrings("solarized-dark", Settings.resolve(.{ .etc = &old }, 1).color_scheme);
+    // The newer name wins within a group, but a VT's group beats [console].
+    var both = try ini.Document.parse(testing.allocator, "[console]\ncolors = \"solarized-dark\"\ncolor-scheme = \"one-half-dark\"\n[vt.2]\ncolors = \"solarized-light\"\n");
+    defer both.deinit();
+    try testing.expectEqualStrings("one-half-dark", Settings.resolve(.{ .etc = &both }, 1).color_scheme);
+    try testing.expectEqualStrings("solarized-light", Settings.resolve(.{ .etc = &both }, 2).color_scheme);
+    try testing.expectEqualStrings("color-scheme", find("colors").?.name);
 }

@@ -368,12 +368,12 @@ pub const Console = struct {
         self.reloadDoc(&self.defs_doc, configtool.defaultsPath(&dbuf));
         self.docs_loaded = true;
         self.settings = config.Settings.resolve(.{ .etc = &self.etc_doc, .defaults = &self.defs_doc }, self.vt_num);
-        self.scheme = termcore.schemes.scheme(self.settings.colors);
+        self.scheme = termcore.schemes.scheme(self.settings.color_scheme);
         sys.log_level = sys.parseLevel(self.settings.log_level);
         self.warnInvalidSettings();
-        log.info("settings: font='{s}' size={d} scale={d} colors={s} scrollback={d} log-level={s} mode='{s}' display='{s}' issue-file='{s}' login-program='{s}'", .{
+        log.info("settings: font='{s}' size={d} scale={d} color-scheme={s} scrollback={d} log-level={s} mode='{s}' display='{s}' issue-file='{s}' login-program='{s}'", .{
             self.settings.font,        self.settings.font_size,        self.settings.scale,
-            self.settings.colors,      self.settings.scrollback_lines, self.settings.log_level,
+            self.settings.color_scheme, self.settings.scrollback_lines, self.settings.log_level,
             self.settings.mode_text,   self.settings.display,          self.settings.issue_file,
             self.settings.login_program,
         });
@@ -399,8 +399,15 @@ pub const Console = struct {
         const vt_group = std.fmt.bufPrint(&gbuf, "vt:{d}", .{self.vt_num}) catch "";
         for ([_][]const u8{ config.group, vt_group }) |g| {
             for (&config.keys) |*k| {
-                const v = self.etc_doc.get(g, k.name) orelse continue;
-                if (config.check(k, v)) |why| log.warn("{s}: [{s}] {s}={s} is ignored: {s}", .{ configtool.etcPath(), g, k.name, v, why });
+                for ([_]?[]const u8{ k.name, k.alias }) |spelling| {
+                    const name = spelling orelse continue;
+                    const v = self.etc_doc.get(g, name) orelse continue;
+                    if (config.check(k, v)) |why| log.warn("{s}: [{s}] {s}={s} is ignored: {s}", .{ configtool.etcPath(), g, name, v, why });
+                }
+            }
+            for (config.unused_shared_keys) |name| {
+                const v = self.etc_doc.get(g, name) orelse continue;
+                if (v.len > 0) log.warn("{s}: [{s}] {s} is not used: the console runs login (see login-program)", .{ configtool.etcPath(), g, name });
             }
         }
     }
@@ -679,6 +686,7 @@ pub const Console = struct {
             .max_scrollback_bytes = scrollbackBytes(self.settings.scrollback_lines),
             .max_scrollback_lines = self.settings.scrollback_lines,
             .kitty_image_storage_limit = self.imageLimit(),
+            .default_cursor_style = self.cursorStyle(),
             .colors = colors,
         });
     }
@@ -693,11 +701,21 @@ pub const Console = struct {
         return @as(usize, self.settings.image_memory_mb) << 20;
     }
 
+    fn cursorStyle(self: *const Console) @FieldType(vt.Terminal.Options, "default_cursor_style") {
+        return switch (self.settings.cursor) {
+            .block => .block,
+            .bar => .bar,
+            .underline => .underline,
+        };
+    }
+
     /// Settings of a running terminal that can change under it.
     fn applyTerminalLimits(self: *Console) void {
         self.term.setScrollbackMaxBytes(scrollbackBytes(self.settings.scrollback_lines));
         self.term.setScrollbackMaxLines(self.settings.scrollback_lines);
         self.term.setKittyGraphicsSizeLimit(self.allocator, self.imageLimit());
+        // A shape the running program chose stays until it asks for the default.
+        self.term.setDefaultCursorStyle(self.cursorStyle());
     }
 
     /// The parser for `self.term`, answering through this console.
