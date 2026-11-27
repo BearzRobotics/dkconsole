@@ -269,6 +269,7 @@ fn scale(v: i32, info: AbsInfo) u16 {
 }
 
 pub const POLLIN: c_short = 1;
+pub const POLLOUT: c_short = 4;
 pub const PollFd = extern struct { fd: c_int, events: c_short, revents: c_short };
 
 const testing = std.testing;

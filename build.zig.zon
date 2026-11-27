@@ -6,8 +6,8 @@
     .dependencies = .{
         // DKTermCore: terminal state, key encoding, colour schemes, PTY.
         .dkterm = .{
-            .url = "https://github.com/BearzRobotics/dkterm/releases/download/v0.1.1/dkterm-0.1.1.tar.gz",
-            .hash = "dkterm-0.1.1-yV77apLsAADpg3_p1DCpxNqOpEyzQIwG8guWTRiSd5u_",
+            .url = "https://github.com/BearzRobotics/dkterm/releases/download/v0.2.0/dkterm-0.2.0.tar.gz",
+            .hash = "dkterm-0.2.0-yV77aoLiAQBOusX6YDNZ0ihoGq-y4bTkiEkf15DjbH43",
         },
         .toml = .{
             .url = "https://github.com/BearzRobotics/toml-zig/releases/download/v0.2.0/toml-0.2.0.tar.gz",

@@ -176,6 +176,8 @@ pub const Console = struct {
     state: vt.RenderState = .empty,
     hold: bool = false,
     pty: Pty = .{ .master = -1, .pid = 0 },
+    /// Input the program has not taken yet.
+    outbox: termcore.pty.Outbox = .{},
     login_running: bool = false,
     last_cursor: ?struct { x: u16, y: u16 } = null,
     cursor_on: bool = true,
@@ -268,6 +270,7 @@ pub const Console = struct {
 
     fn shutdown(self: *Console) void {
         self.pty.deinit();
+        self.outbox.deinit(self.allocator);
         self.releaseDisplayResources();
         self.input.deinit();
         self.keymap.deinit();
@@ -502,11 +505,14 @@ pub const Console = struct {
 
     fn setupTerminal(self: *Console) !void {
         const a = self.allocator;
+        var colors = try termcore.glue.terminalColors(a, self.scheme);
+        // The terminal frees the palette once it has taken it.
+        errdefer colors.palette.deinit(a);
         self.term = try vt.Terminal.init(self.tiny_io.io(), a, .{
             .cols = self.cols,
             .rows = self.rows,
             .max_scrollback_lines = self.settings.scrollback_lines,
-            .colors = try termcore.glue.terminalColors(a, self.scheme),
+            .colors = colors,
         });
         self.stream = self.term.vtStream();
         var e = vt.TerminalStream.Handler.Effects.readonly;
@@ -525,8 +531,24 @@ pub const Console = struct {
     }
 
     fn onWritePty(handler: *vt.TerminalStream.Handler, data: []const u8) void {
-        const self = fromHandler(handler);
-        if (self.login_running) self.pty.writeAll(data);
+        fromHandler(handler).send(&.{data});
+    }
+
+    /// Sends `parts` to the program as one message: all of it arrives, in
+    /// order, or none of it is sent and the log says so.
+    fn send(self: *Console, parts: []const []const u8) void {
+        if (!self.login_running) return;
+        self.outbox.queue(self.allocator, parts) catch |e| {
+            log.warn("input not sent: {s}", .{@errorName(e)});
+            return;
+        };
+        self.flushInput();
+    }
+
+    fn flushInput(self: *Console) void {
+        // A failed write means the terminal has hung up; keeping the input
+        // for whoever opens it next would be wrong.
+        self.outbox.flush(self.allocator, &self.pty) catch self.outbox.clear(self.allocator);
     }
 
     fn onRenderHold(handler: *vt.TerminalStream.Handler, hold: bool) void {
@@ -592,13 +614,15 @@ pub const Console = struct {
             self.stream.nextSlice("dkconsole: no login program found\r\n");
             return;
         };
+        var failure: c_int = 0;
         self.pty = Pty.spawn(a, .{
+            .failure_errno = &failure,
             .path = path,
             .argv = &.{"login"},
             .env = &.{ "TERM=xterm-256color", "COLORTERM=truecolor" },
             .size = self.ptySize(),
         }) catch |e| {
-            log.err("cannot start {s}: {s}", .{ path, @errorName(e) });
+            log.err("cannot start {s}: {s} (errno {d})", .{ path, @errorName(e), failure });
             self.stream.nextSlice("dkconsole: cannot start login\r\n");
             return;
         };
@@ -640,6 +664,7 @@ pub const Console = struct {
     fn loginExited(self: *Console) void {
         log.info("login ended; starting it again", .{});
         self.pty.deinit();
+        self.outbox.clear(self.allocator);
         self.login_running = false;
         self.stream.nextSlice("\x1b[0m\x1b[H\x1b[2J\x1b[3J");
         self.term.scrollViewport(.bottom);
@@ -659,7 +684,11 @@ pub const Console = struct {
             fds[n] = .{ .fd = self.sig_fd, .events = evdev.POLLIN, .revents = 0 };
             n += 1;
             const pty_i = n;
-            fds[n] = .{ .fd = if (self.login_running) self.pty.fd() else -1, .events = evdev.POLLIN, .revents = 0 };
+            fds[n] = .{
+                .fd = if (self.login_running) self.pty.fd() else -1,
+                .events = if (self.outbox.pending()) evdev.POLLIN | evdev.POLLOUT else evdev.POLLIN,
+                .revents = 0,
+            };
             n += 1;
             const conf_i = n;
             fds[n] = .{ .fd = self.conf_watch, .events = evdev.POLLIN, .revents = 0 };
@@ -686,7 +715,8 @@ pub const Console = struct {
             if (fds[sig_i].revents != 0) self.handleSignals(&dirty);
             if (self.quit) break;
             if (fds[conf_i].revents != 0) self.reloadConfig(&dirty);
-            if (fds[pty_i].revents != 0) self.readPty(&dirty);
+            if (fds[pty_i].revents & evdev.POLLOUT != 0 and self.login_running) self.flushInput();
+            if (fds[pty_i].revents & ~@as(c_short, evdev.POLLOUT) != 0) self.readPty(&dirty);
             if (fds[drm_i].revents != 0) {
                 if (self.dev.?.readEvents() > 0) {
                     self.flip_pending = false;
@@ -740,7 +770,6 @@ pub const Console = struct {
                 },
                 vtmod.SIGCHLD => if (self.login_running) {
                     if (self.pty.poll() != null) {
-                        self.pty.pid = 0;
                         self.loginExited();
                         dirty.* = true;
                     }
@@ -799,13 +828,10 @@ pub const Console = struct {
         var rounds: usize = 0;
         // Bounded, so a flood of output cannot starve the keyboard.
         while (rounds < 16) : (rounds += 1) {
-            const n = self.pty.readSome(&buf) orelse {
+            const n = self.pty.readSome(&buf) catch {
                 // The slave side closed: login ended; SIGCHLD will say so, but do
                 // not spin on a closed descriptor meanwhile.
-                if (self.pty.poll() != null) {
-                    self.pty.pid = 0;
-                    self.loginExited();
-                }
+                if (self.pty.poll() != null) self.loginExited();
                 dirty.* = true;
                 return;
             };
@@ -993,7 +1019,7 @@ pub const Console = struct {
         const opts = vt.input.KeyEncodeOptions.fromTerminal(&self.term);
         vt.input.encodeKey(&w, event, opts) catch return;
         const out = w.buffered();
-        if (out.len > 0) self.pty.writeAll(out);
+        if (out.len > 0) self.send(&.{out});
         dirty.* = true;
     }
 
@@ -1002,7 +1028,8 @@ pub const Console = struct {
         const copy = self.allocator.dupe(u8, text) catch return;
         defer self.allocator.free(copy);
         const opts = vt.input.PasteOptions.fromTerminal(&self.term);
-        for (vt.input.encodePaste(copy, opts)) |part| if (part.len > 0) self.pty.writeAll(part);
+        const parts = vt.input.encodePaste(copy, opts);
+        self.send(&parts);
         self.term.scrollViewport(.bottom);
     }
 
@@ -1032,7 +1059,7 @@ pub const Console = struct {
             .mods = .{ .shift = self.decoder.held[0] > 0, .ctrl = self.decoder.held[2] > 0, .alt = self.decoder.held[3] > 0 },
             .pos = .{ .x = @floatFromInt(self.pointer_x), .y = @floatFromInt(self.pointer_y) },
         }, opts) catch return;
-        self.pty.writeAll(w.buffered());
+        self.send(&.{w.buffered()});
     }
 
     fn pointerMoved(self: *Console, dirty: *bool) void {
