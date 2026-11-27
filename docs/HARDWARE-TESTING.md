@@ -80,7 +80,7 @@ sudo dkconsole report > dkconsole-report.txt 2>&1
 ```
 
 It contains the dkconsole version, kernel, the settings in effect and where each came from, every
-DRM device with its connectors and modes, input device names, the crash counters, and the tail of
+DRM device with its connectors and modes, input device names, the crash records, and the tail of
 the console's own log for each VT (and the previous run's). Read it before sharing it. It has
 the kernel command line and device names but not serial numbers or the host name.
 
@@ -117,7 +117,7 @@ VT switch and each step of taking and releasing the display.
 Switch to your spare VT or SSH in, then:
 
 ```
-sudo dkconsole recovery status              # crash counter per VT
+sudo dkconsole recovery status              # crash record per VT: recent failures, latched or not
 sudo dkconsole recovery reset --vt 5        # clear it (root); a running console is not touched
 ```
 

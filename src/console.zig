@@ -239,8 +239,8 @@ pub const Console = struct {
     login_started_at: i64 = 0,
     login_failures: u32 = 0,
     login_retry_at: ?i64 = null,
-    healthy_at: i64 = 0,
-    healthy_done: bool = false,
+    /// The loop ended because something went wrong.
+    failed: bool = false,
     quit: bool = false,
 
     // ---- start-up ----------------------------------------------------------------
@@ -257,18 +257,18 @@ pub const Console = struct {
         self.vtdev.restoreText();
 
         self.loadSettings();
-        const starts = fallback.readCounter(a, self.vt_num);
+        var history = fallback.load(a, self.vt_num);
         var uts: issue.Uts = .{};
         const sysinfo = uts.system("");
         log.info("dkconsole {s} on {s} {s} {s}", .{ build_options.version, sysinfo.sysname, sysinfo.release, sysinfo.machine });
-        log.info("starting on tty{d}: {d} start(s) in the last {d} s, euid {d}", .{ self.vt_num, starts, fallback.healthy_seconds, std.c.geteuid() });
-        const decision = fallback.decide(starts);
-        if (decision.fall_back) {
-            log.err("too many recent crashes ({d} starts); using the plain getty: {s}", .{ starts, self.settings.fallback });
+        const use_getty = history.start(fallback.bootSeconds());
+        log.info("starting on tty{d}: {d} failure(s) on record, euid {d}", .{ self.vt_num, history.count, std.c.geteuid() });
+        self.saveHistory(history);
+        if (use_getty) {
+            log.err("too many recent crashes; using the plain getty until `dkconsole recovery reset` or reboot: {s}", .{self.settings.fallback});
             fallback.execFallback(a, self.settings.fallback, &self.vtdev);
             return 1;
         }
-        if (decision.write_count) |n| fallback.writeCounter(self.vt_num, n);
 
         self.sig_fd = vtmod.installSignals() orelse blk: {
             log.err("cannot set up signal handling; VT switching and shutdown will not work", .{});
@@ -277,6 +277,7 @@ pub const Console = struct {
 
         if (!self.openDisplay()) {
             log.err("no usable display (see the drm lines above); using the plain getty: {s}", .{self.settings.fallback});
+            self.recordEnd(true);
             fallback.execFallback(a, self.settings.fallback, &self.vtdev);
             return 1;
         }
@@ -287,6 +288,7 @@ pub const Console = struct {
 
         self.setupTerminal() catch |e| {
             log.err("terminal setup failed ({s}); using the plain getty: {s}", .{ @errorName(e), self.settings.fallback });
+            self.recordEnd(true);
             self.closeDisplay();
             fallback.execFallback(a, self.settings.fallback, &self.vtdev);
             return 1;
@@ -303,12 +305,12 @@ pub const Console = struct {
             d.dropMaster();
         }
 
-        self.healthy_at = nowSeconds() + fallback.healthy_seconds;
         self.watchConfig();
         log.info("running: {d}x{d} cells, login {s}", .{ self.cols, self.rows, if (self.login_running) "started" else "NOT running" });
         self.loop();
         log.info("stopping", .{});
         self.shutdown();
+        self.recordEnd(self.failed or self.use_fallback);
         if (self.use_fallback) {
             log.err("using the plain getty: {s}", .{self.settings.fallback});
             fallback.execFallback(a, self.settings.fallback, &self.vtdev);
@@ -316,6 +318,19 @@ pub const Console = struct {
         }
         self.vtdev.close();
         return 0;
+    }
+
+    /// Notes how this start ended. Only unclean ends count against the VT.
+    fn recordEnd(self: *Console, failure: bool) void {
+        // Read again: `recovery reset` may have run meanwhile.
+        var history = fallback.load(self.allocator, self.vt_num);
+        if (failure) history.fail(fallback.bootSeconds()) else history.stop();
+        self.saveHistory(history);
+    }
+
+    fn saveHistory(self: *Console, history: fallback.State) void {
+        fallback.save(self.allocator, self.vt_num, history) catch |e|
+            log.warn("cannot write the crash record ({s}): repeated crashes will not be noticed", .{@errorName(e)});
     }
 
     fn shutdown(self: *Console) void {
@@ -837,6 +852,7 @@ pub const Console = struct {
             // The old session must not be shown to anyone else. Leaving lets
             // the init system start a clean console.
             log.err("cannot make a new terminal ({s}); restarting", .{@errorName(e)});
+            self.failed = true;
             self.quit = true;
             return;
         };
@@ -873,14 +889,10 @@ pub const Console = struct {
             if (r < 0) {
                 if (sys.errno() == sys.EINTR) continue;
                 log.err("poll failed (errno {d}); stopping", .{sys.errno()});
+                self.failed = true;
                 break;
             }
             const now = nowSeconds();
-            if (!self.healthy_done and now >= self.healthy_at) {
-                fallback.writeCounter(self.vt_num, 0);
-                self.healthy_done = true;
-            }
-
             var dirty = false;
             if (fds[sig_i].revents != 0) self.handleSignals(&dirty);
             if (self.quit) break;
@@ -931,8 +943,6 @@ pub const Console = struct {
 
     fn timeoutMs(self: *const Console) c_int {
         var ms: i64 = -1;
-        const now = nowSeconds();
-        if (!self.healthy_done) ms = @max(0, self.healthy_at - now) * 1000;
         if (self.have_display and self.settings.cursor_blink) {
             ms = if (ms < 0) 500 else @min(ms, 500);
         }
@@ -1334,8 +1344,6 @@ fn testConsole(a: std.mem.Allocator) !*Console {
     c.settings = config.Settings.resolve(.{}, 1);
     c.settings.login_program = "/bin/true";
     c.settings.issue_file = "";
-    // Otherwise the pending health check makes every poll timeout 0.
-    c.healthy_done = true;
     c.scheme = termcore.schemes.scheme("campbell");
     c.renderer.cell_w = 8;
     c.renderer.cell_h = 16;

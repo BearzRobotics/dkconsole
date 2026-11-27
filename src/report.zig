@@ -121,24 +121,30 @@ pub fn report(allocator: std.mem.Allocator) u8 {
     return 0;
 }
 
-/// Print the crash counter of one VT, or of every VT that has one when `vt` is 0.
+/// Print the crash record of one VT, or of every VT that has one when `vt` is 0.
 pub fn recoveryStatus(allocator: std.mem.Allocator, vt: u32) void {
     var shown = false;
     var n: u32 = 1;
     while (n <= 63) : (n += 1) {
         if (vt != 0 and n != vt) continue;
         var pb: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&pb, "{s}/tty{d}.starts", .{ fallback.state_dir, n }) catch continue;
-        if (!sys.exists(path) and vt == 0) continue;
+        if (!sys.exists(fallback.statePath(&pb, n)) and vt == 0) continue;
         shown = true;
-        const starts = fallback.readCounter(allocator, n);
-        const latched = fallback.decide(starts).fall_back;
-        sys.print(out, "tty{d}: {d} start(s) counted; {s}\n", .{
-            n,                                                                                                   starts,
-            if (latched) "the next start goes straight to the plain getty (latched until `dkconsole recovery reset` or reboot)" else "the console will start normally",
+        var state = fallback.load(allocator, n);
+        const now = fallback.bootSeconds();
+        state.expire(now);
+        sys.print(out, "tty{d}: {d} failure(s) in the last {d} s; {s}\n", .{
+            n,                                                                                                                       state.count,
+            fallback.window_seconds,
+            if (state.latched) "latched: every start goes to the plain getty until `dkconsole recovery reset` or reboot" else "the console will start normally",
         });
+        if (state.count > 0) {
+            sys.print(out, "  failed", .{});
+            for (state.failures[0..state.count]) |when| sys.print(out, " {d} s ago", .{now - when});
+            sys.print(out, "\n", .{});
+        }
     }
-    if (!shown) sys.print(out, "no VT has crashed or started recently\n", .{});
+    if (!shown) sys.print(out, "no console has started since boot (or the record cannot be read without root)\n", .{});
 }
 
 /// `dkconsole recovery status [--vt N]` and `recovery reset --vt N`.
@@ -168,9 +174,15 @@ pub fn recovery(allocator: std.mem.Allocator, args: []const []const u8) u8 {
             sys.print(err, "dkconsole: recovery reset needs root\n", .{});
             return 1;
         }
-        // Only the counter is touched: a console that is running keeps running.
-        fallback.writeCounter(vt, 0);
-        sys.print(out, "tty{d}: crash counter cleared\n", .{vt});
+        // Only the record is touched: a console that is running keeps running.
+        var state = fallback.load(allocator, vt);
+        state.latched = false;
+        state.count = 0;
+        fallback.save(allocator, vt, state) catch |e| {
+            sys.print(err, "dkconsole: tty{d}: cannot clear the crash record: {s}\n", .{ vt, @errorName(e) });
+            return 1;
+        };
+        sys.print(out, "tty{d}: crash record cleared\n", .{vt});
         return 0;
     }
     sys.print(err, "{s}", .{usage});

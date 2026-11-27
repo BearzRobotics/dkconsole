@@ -47,7 +47,7 @@ valid TOML is ignored and the console keeps working with defaults.
 
 ```
 dkconsole report                          what the console sees, to attach to a bug report
-dkconsole recovery status [--vt N]        crash counter: will the next start go to agetty?
+dkconsole recovery status [--vt N]        crash record: recent failures, and whether starts go to agetty
 dkconsole recovery reset --vt N           clear it (root); does not disturb a running console
 dkconsole version
 ```

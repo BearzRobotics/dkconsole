@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         \\usage: dkconsole --vt N          run on virtual terminal N
         \\       dkconsole config ...      change the console settings
         \\       dkconsole report          what the console sees, for a bug report
-        \\       dkconsole recovery ...    crash counter: status, reset --vt N
+        \\       dkconsole recovery ...    crash record: status, reset --vt N
         \\       dkconsole version
         \\
     ;

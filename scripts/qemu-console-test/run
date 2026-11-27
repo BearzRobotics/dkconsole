@@ -154,7 +154,7 @@ tests() {
     check "the report lists a connected display"  bash -c "grep -q 'connector [0-9]* .*: connected' serial.log && grep -q '  mode [0-9]*x[0-9]*@' serial.log"
     check "the report includes the console log"   bash -c "grep -q 'run/dkconsole/tty1.log' serial.log && grep -q 'login started' serial.log"
     check "the report lists the settings"         grep -q 'issue-file = ' serial.log
-    check "recovery status answers"               bash -c "grep -q 'tty1: [0-9]* start' serial.log"
+    check "recovery status answers"               bash -c "grep -q 'tty1: 0 failure(s) in the last 60 s; the console will start normally' serial.log"
 
     echo "== display mode, changed while the console runs"
     $TOOLS type 'dkconsole config set mode 800x600; sleep 1; dkconsole config set mode ""; echo MODE-DONE > /dev/ttyS0\n'
