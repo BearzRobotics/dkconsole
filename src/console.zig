@@ -25,7 +25,6 @@ const log = std.log.scoped(.console);
 
 extern fn poll(fds: [*]evdev.PollFd, n: c_ulong, timeout: c_int) c_int;
 extern fn clock_gettime(clock: c_int, ts: *Timespec) c_int;
-extern fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
 extern fn inotify_init1(flags: c_int) c_int;
 extern fn inotify_add_watch(fd: c_int, path: [*:0]const u8, mask: u32) c_int;
 const Timespec = extern struct { sec: c_long, nsec: c_long };
@@ -45,6 +44,13 @@ fn nowMs() i64 {
 /// How long to wait before each further try at taking the display. Another
 /// process, our own on another VT included, may still hold it for a moment.
 const display_retry_ms = [_]i64{ 100, 200, 400, 800, 1600 };
+
+/// A login that cannot be started, or ends this soon, has failed. After this
+/// many failures in a row the VT goes to the fallback getty; between tries the
+/// console waits, without blocking.
+const quick_login_ms = 2000;
+const max_login_failures = 5;
+const login_retry_ms = 1000;
 
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
@@ -212,7 +218,10 @@ pub const Console = struct {
 
     /// The fonts changed while this VT was in the background.
     layout_stale: bool = false,
+    /// When the running login was started, in ms; 0 before the first.
     login_started_at: i64 = 0,
+    login_failures: u32 = 0,
+    login_retry_at: ?i64 = null,
     healthy_at: i64 = 0,
     healthy_done: bool = false,
     quit: bool = false,
@@ -694,24 +703,17 @@ pub const Console = struct {
 
     fn startLogin(self: *Console) void {
         const a = self.allocator;
-        // A login that keeps exiting at once (a broken PAM setup) must not make
-        // this loop spin: wait a second before the next try.
-        const now = nowSeconds();
-        if (self.login_started_at != 0 and now - self.login_started_at < 1) {
-            var ts: Timespec = .{ .sec = 1, .nsec = 0 };
-            _ = nanosleep(&ts, null);
-        }
-        self.login_started_at = nowSeconds();
+        self.login_retry_at = null;
         self.printIssue();
-        const configured = a.dupeSentinel(u8, self.settings.login_program, 0) catch return;
+        const configured = a.dupeSentinel(u8, self.settings.login_program, 0) catch return self.loginFailed();
         defer a.free(configured);
         if (configured.len > 0 and !sys.exists(configured)) log.warn("login-program {s} does not exist; looking for a login in the usual places", .{configured});
         const path: [:0]const u8 = if (configured.len > 0 and sys.exists(configured)) configured else for (login_paths) |p| {
             if (sys.exists(p)) break p;
         } else {
-            log.err("no login program found (tried {s}, ...)", .{login_paths[0]});
+            log.warn("no login program found (tried {s}, ...)", .{login_paths[0]});
             self.stream.nextSlice("dkconsole: no login program found\r\n");
-            return;
+            return self.loginFailed();
         };
         var failure: c_int = 0;
         self.pty = Pty.spawn(a, .{
@@ -721,12 +723,26 @@ pub const Console = struct {
             .env = &.{ "TERM=xterm-256color", "COLORTERM=truecolor" },
             .size = self.ptySize(),
         }) catch |e| {
-            log.err("cannot start {s}: {s} (errno {d})", .{ path, @errorName(e), failure });
+            log.warn("cannot start {s}: {s} (errno {d})", .{ path, @errorName(e), failure });
             self.stream.nextSlice("dkconsole: cannot start login\r\n");
-            return;
+            return self.loginFailed();
         };
+        self.login_started_at = nowMs();
         self.login_running = true;
         log.info("login started: {s}, pid {d}", .{ path, self.pty.pid });
+    }
+
+    /// Tries again shortly, or gives the VT to the fallback getty: a console
+    /// that cannot offer a login must not keep the VT.
+    fn loginFailed(self: *Console) void {
+        self.login_failures += 1;
+        if (self.login_failures >= max_login_failures) {
+            log.warn("login failed {d} times in a row; giving up", .{self.login_failures});
+            self.use_fallback = true;
+            self.quit = true;
+            return;
+        }
+        self.login_retry_at = nowMs() + login_retry_ms;
     }
 
     fn printIssue(self: *Console) void {
@@ -762,6 +778,7 @@ pub const Console = struct {
     /// shell itself.
     fn loginExited(self: *Console) void {
         log.info("login ended; starting it again", .{});
+        const quick = self.login_started_at != 0 and nowMs() - self.login_started_at < quick_login_ms;
         self.pty.deinit();
         self.outbox.clear(self.allocator);
         self.login_running = false;
@@ -772,6 +789,8 @@ pub const Console = struct {
             self.quit = true;
             return;
         };
+        if (quick) return self.loginFailed();
+        self.login_failures = 0;
         self.startLogin();
     }
 
@@ -837,6 +856,10 @@ pub const Console = struct {
                     if (self.have_display) self.handleInput(ev, &dirty) else self.handleBlindInput(ev);
                 }
             }
+            if (self.login_retry_at) |at| if (nowMs() >= at) {
+                self.startLogin();
+                dirty = true;
+            };
             if (self.display_retry_at) |at| if (nowMs() >= at) {
                 self.takeDisplay();
                 dirty = true;
@@ -854,8 +877,8 @@ pub const Console = struct {
         if (self.have_display and self.settings.cursor_blink) {
             ms = if (ms < 0) 500 else @min(ms, 500);
         }
-        if (self.display_retry_at) |at| {
-            const left = @max(0, at - nowMs());
+        for ([_]?i64{ self.display_retry_at, self.login_retry_at }) |deadline| {
+            const left = @max(0, (deadline orelse continue) - nowMs());
             ms = if (ms < 0) left else @min(ms, left);
         }
         return @intCast(ms);
@@ -1319,4 +1342,45 @@ test "a display that cannot be taken is retried, then given up" {
     try std.testing.expect(waited < 5000);
     c.displayFailed();
     try std.testing.expect(c.quit and c.use_fallback);
+}
+
+test "a login that cannot start is retried, then the fallback takes over" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.settings.login_program = "/etc/hostname"; // exists, cannot be run
+    var tries: u32 = 1;
+    c.startLogin();
+    while (!c.quit) : (tries += 1) {
+        try std.testing.expect(!c.login_running);
+        try std.testing.expect(c.login_retry_at != null);
+        try std.testing.expect(c.timeoutMs() <= login_retry_ms);
+        c.startLogin();
+    }
+    try std.testing.expect(c.use_fallback);
+    try std.testing.expectEqual(@as(u32, max_login_failures), tries);
+    try std.testing.expect(try screenHas(c, "cannot start login"));
+}
+
+test "a login that keeps ending at once leads to the fallback" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.startLogin();
+    var exits: u32 = 0;
+    while (!c.quit and exits < 20) : (exits += 1) {
+        if (!c.login_running) c.startLogin();
+        c.loginExited();
+    }
+    try std.testing.expect(c.use_fallback);
+    try std.testing.expectEqual(@as(u32, max_login_failures), exits);
+}
+
+test "a login that lasted clears the failure count" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.login_failures = max_login_failures - 1;
+    c.login_started_at = nowMs() - quick_login_ms - 1;
+    c.loginExited();
+    try std.testing.expect(!c.quit);
+    try std.testing.expectEqual(@as(u32, 0), c.login_failures);
+    try std.testing.expect(c.login_running);
 }
