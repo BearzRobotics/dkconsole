@@ -23,37 +23,51 @@ pub const Cursor = struct {
 };
 
 pub const Renderer = struct {
-    /// PSF fonts: the main font first when `faces` is empty, else fallbacks.
+    /// PSF fonts: the main font first unless `main_face`, then fallbacks.
     fonts: []const *const psf.Font,
-    /// TrueType faces; when there are any, the first one is the main font.
+    /// TrueType faces: the main font first if `main_face`, then fallbacks.
     faces: []const *ttf.Face = &.{},
+    /// The main font is `faces[0]` rather than `fonts[0]`.
+    main_face: bool = false,
     scale: u32,
     cell_w: u32,
     cell_h: u32,
 
     pub fn init(fonts: []const *const psf.Font, scale: u32) Renderer {
-        return initMixed(fonts, &.{}, scale);
+        return initMixed(fonts, &.{}, false, scale);
     }
 
-    /// `faces[0]`, if there is one, sets the cell; otherwise `fonts[0]` does.
-    /// A TrueType face is already sized in pixels, so `scale` applies to PSF only.
-    pub fn initMixed(fonts: []const *const psf.Font, faces: []const *ttf.Face, scale: u32) Renderer {
-        if (faces.len > 0) return .{ .fonts = fonts, .faces = faces, .scale = 1, .cell_w = faces[0].cell_w, .cell_h = faces[0].cell_h };
+    /// The main font sets the cell: `faces[0]` if `main_face`, else
+    /// `fonts[0]`. A TrueType face is already sized in pixels, so `scale`
+    /// applies to PSF only. Fallback faces must be as tall as the cell.
+    pub fn initMixed(fonts: []const *const psf.Font, faces: []const *ttf.Face, main_face: bool, scale: u32) Renderer {
+        if (main_face) return .{ .fonts = fonts, .faces = faces, .main_face = true, .scale = 1, .cell_w = faces[0].cell_w, .cell_h = faces[0].cell_h };
         const f = fonts[0];
-        return .{ .fonts = fonts, .scale = scale, .cell_w = f.width * scale, .cell_h = f.height * scale };
+        return .{ .fonts = fonts, .faces = faces, .scale = scale, .cell_w = f.width * scale, .cell_h = f.height * scale };
     }
 
-    const Glyph = union(enum) {
+    pub const Glyph = union(enum) {
         bitmap: struct { font: *const psf.Font, bitmap: []const u8 },
         coverage: []const u8,
     };
 
-    fn glyphFor(self: *const Renderer, cp: u21, wide: bool, bold: bool) ?Glyph {
-        if (self.faces.len > 0) {
-            for (self.faces) |f| if (f.coverage(cp, wide, bold, self.cell_w)) |c| return .{ .coverage = c };
+    pub fn glyphFor(self: *const Renderer, cp: u21, wide: bool, bold: bool) ?Glyph {
+        // The main font's kind is searched first.
+        if (self.main_face) {
+            if (self.faceGlyph(cp, wide, bold)) |g| return g;
             // A blank glyph in the main face (a space) has no coverage: not "missing".
             if (self.faces[0].has(cp)) return null;
+            return self.bitmapGlyph(cp);
         }
+        return self.bitmapGlyph(cp) orelse self.faceGlyph(cp, wide, bold);
+    }
+
+    fn faceGlyph(self: *const Renderer, cp: u21, wide: bool, bold: bool) ?Glyph {
+        for (self.faces) |f| if (f.coverage(cp, wide, bold, self.cell_w)) |c| return .{ .coverage = c };
+        return null;
+    }
+
+    fn bitmapGlyph(self: *const Renderer, cp: u21) ?Glyph {
         for (self.fonts) |f| {
             // Only fonts with the same cell size can share a grid.
             if (f.width * self.scale != self.cell_w or f.height * self.scale != self.cell_h) continue;
@@ -62,9 +76,11 @@ pub const Renderer = struct {
         return null;
     }
 
-    /// Whether the characters of the main face should never get a "missing" box.
+    /// Whether a character with nothing to draw should get no "missing" box:
+    /// some face has it, as an empty glyph.
     fn blank(self: *const Renderer, cp: u21) bool {
-        return self.faces.len > 0 and self.faces[0].has(cp);
+        for (self.faces) |f| if (f.has(cp)) return true;
+        return false;
     }
 
     /// Colours of a cell after style, inverse, bold-as-bright and selection.

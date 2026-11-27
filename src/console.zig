@@ -444,7 +444,8 @@ pub const Console = struct {
         }
         if (builtin_height == null and self.settings.font.len > 0) main_ok = set.addFile(a, self.settings.font, h);
         // A TrueType cell is not half as wide as it is tall: shrink until 80 columns fit.
-        if (main_ok and set.faces.items.len > 0) {
+        const main_face = main_ok and set.faces.items.len > 0;
+        if (main_face) {
             const face = set.faces.items[0];
             const wanted = h;
             while (face.cell_h > 8 and self.out.width() / face.cell_w < 80) face.resize(face.cell_h - 1);
@@ -460,7 +461,12 @@ pub const Console = struct {
 
         self.fonts.deinit(a);
         self.fonts = set;
-        self.renderer = render.Renderer.initMixed(self.fonts.ptrs.items, self.fonts.faces.items, self.settings.scale);
+        self.renderer = render.Renderer.initMixed(self.fonts.ptrs.items, self.fonts.faces.items, main_face, self.settings.scale);
+        // A fallback face beside a PSF main font draws into its cell, which
+        // `scale` may have made taller than the height asked of the face.
+        if (!main_face) for (self.fonts.faces.items) |face| {
+            if (face.cell_h != self.renderer.cell_h) face.resize(self.renderer.cell_h);
+        };
 
         const cols = self.out.width() / self.renderer.cell_w;
         const rows = self.out.height() / self.renderer.cell_h;
@@ -469,7 +475,7 @@ pub const Console = struct {
         self.origin_x = (self.out.width() - @as(u32, self.cols) * self.renderer.cell_w) / 2;
         self.origin_y = (self.out.height() - @as(u32, self.rows) * self.renderer.cell_h) / 2;
         log.info("layout: {s} font, cell {d}x{d}, {d} columns x {d} rows, margin {d},{d}", .{
-            if (self.fonts.faces.items.len > 0) "TrueType" else "PSF", self.renderer.cell_w, self.renderer.cell_h,
+            if (main_face) "TrueType" else "PSF", self.renderer.cell_w, self.renderer.cell_h,
             self.cols,                                                  self.rows,                                self.origin_x,
             self.origin_y,
         });
@@ -1512,4 +1518,30 @@ test "reloads, relayouts, selections and logouts free what they replace" {
         c.markRow(3);
         c.loginExited();
     }
+}
+
+test "a TrueType fallback does not become the main font" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    setTestOutput(c, 1920, 1080);
+    const dejavu = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    if (!sys.exists(dejavu)) return error.SkipZigTest;
+    c.settings.font = "terminus-32";
+    try c.buildLayout();
+    const cell = .{ c.renderer.cell_w, c.renderer.cell_h, c.cols, c.rows };
+    c.settings.fallback_fonts = dejavu;
+    for ([_]u32{ 1, 2 }) |scale| {
+        c.settings.scale = scale;
+        c.settings.font_size = 32 / scale;
+        try c.buildLayout();
+        try std.testing.expect(!c.renderer.main_face);
+        try std.testing.expectEqual(c.renderer.cell_h, c.renderer.faces[0].cell_h);
+    }
+    c.settings.scale = 1;
+    c.settings.font_size = 0;
+    try c.buildLayout();
+    try std.testing.expectEqual(cell, .{ c.renderer.cell_w, c.renderer.cell_h, c.cols, c.rows });
+    // The main font draws what it has; the face only what it lacks.
+    try std.testing.expect(c.renderer.glyphFor('A', false, false).? == .bitmap);
+    try std.testing.expect(c.renderer.glyphFor(0x1E9E, false, false).? == .coverage);
 }
