@@ -34,6 +34,17 @@ pub const SIGCHLD = 17;
 pub const SIGUSR1 = 10; // the kernel asks us to release the VT
 pub const SIGUSR2 = 12; // the VT is ours again
 
+/// The VT this process has taken, for `restoreAfterPanic`.
+var taken_fd: c_int = -1;
+
+/// A panic runs no cleanup, and a VT left taken has a dead keyboard until
+/// something restarts the console. Only ioctls: safe in any state.
+pub fn restoreAfterPanic() void {
+    if (taken_fd < 0) return;
+    const vt: Vt = .{ .fd = taken_fd, .num = 0 };
+    vt.restoreText();
+}
+
 pub const Vt = struct {
     fd: c_int,
     num: u32,
@@ -63,6 +74,7 @@ pub const Vt = struct {
     /// Take the VT: switching away asks us first, the kernel stops drawing text
     /// on it, and keystrokes reach only us.
     pub fn take(self: *const Vt) bool {
+        taken_fd = self.fd;
         const mode: VtMode = .{ .mode = VT_PROCESS, .waitv = 0, .relsig = SIGUSR1, .acqsig = SIGUSR2, .frsig = 0 };
         if (sys.ioctl(self.fd, VT_SETMODE, &mode) != 0) {
             log.err("tty{d}: VT_SETMODE failed (errno {d}); switching away will not be announced", .{ self.num, sys.errno() });

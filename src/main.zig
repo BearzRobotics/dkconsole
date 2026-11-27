@@ -8,9 +8,19 @@ const configtool = @import("configtool.zig");
 const console = @import("console.zig");
 const report = @import("report.zig");
 const sys = @import("sys.zig");
+const vt = @import("vt.zig");
 
 // The compiled-in level lets everything through; `sys.log_level` filters while
 // running, so `[console] log-level=debug` needs no rebuild.
+/// A failed safety check anywhere, the terminal parser included, gives the VT
+/// back before the process ends.
+pub const panic = std.debug.FullPanic(panicked);
+
+fn panicked(message: []const u8, first_address: ?usize) noreturn {
+    vt.restoreAfterPanic();
+    std.debug.defaultPanic(message, first_address);
+}
+
 pub const std_options: std.Options = .{ .log_level = .debug, .logFn = sys.logFn };
 
 pub fn main(init: std.process.Init.Minimal) !void {
