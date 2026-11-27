@@ -137,7 +137,7 @@ fn loadOrReport(allocator: std.mem.Allocator, path: []const u8, broken: *bool) i
 fn sourceName(s: config.Source) []const u8 {
     return switch (s) {
         .default => "default",
-        .system_defaults => "share/dkde/console.conf",
+        .system_defaults => "config.example.toml",
         .etc => "/etc",
         .vt => "[vt]",
     };
@@ -239,8 +239,11 @@ fn set(allocator: std.mem.Allocator, etc: *ini.Document, vt: u32, name: []const 
         return 1;
     }
     var gbuf: [24]u8 = undefined;
-    const changed = assign(etc, groupFor(&gbuf, vt), k, value) catch {
-        sys.print(err_fd, "dkconsole: out of memory\n", .{});
+    const changed = assign(etc, groupFor(&gbuf, vt), k, value) catch |e| {
+        switch (e) {
+            error.InvalidDocument => sys.print(err_fd, "dkconsole: {s}: [{s}] is not a table of settings there; nothing was changed\n", .{ etcPath(), groupFor(&gbuf, vt) }),
+            else => sys.print(err_fd, "dkconsole: out of memory\n", .{}),
+        }
         return 1;
     };
     if (!changed) return 0; // already in effect: write nothing

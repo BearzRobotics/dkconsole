@@ -401,7 +401,10 @@ pub const Console = struct {
             for (&config.keys) |*k| {
                 for ([_]?[]const u8{ k.name, k.alias }) |spelling| {
                     const name = spelling orelse continue;
-                    const v = self.etc_doc.get(g, name) orelse continue;
+                    const v = self.etc_doc.get(g, name) orelse {
+                        if (self.etc_doc.has(g, name)) log.warn("{s}: [{s}] {s} is ignored: it must be text, a number or true or false", .{ configtool.etcPath(), g, name });
+                        continue;
+                    };
                     if (config.check(k, v)) |why| log.warn("{s}: [{s}] {s}={s} is ignored: {s}", .{ configtool.etcPath(), g, name, v, why });
                 }
             }

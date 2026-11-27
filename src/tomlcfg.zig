@@ -90,6 +90,12 @@ pub const Document = struct {
         };
     }
 
+    /// Whether `group.key` is there at all, whatever its type.
+    pub fn has(self: *const Document, group: []const u8, key: []const u8) bool {
+        const t = self.table(group) orelse return false;
+        return t.get(key) != null;
+    }
+
     fn format(self: *const Document, comptime fmt: []const u8, args: anytype) ?[]const u8 {
         // `scratch` is an implementation detail of reading, not document state.
         const scratch: *std.heap.ArenaAllocator = @constCast(&self.scratch);
@@ -210,4 +216,15 @@ test "remove, an empty document, and invalid TOML" {
     try testing.expect(d.remove("console", "x"));
     try testing.expect(d.get("console", "x") == null);
     try testing.expectError(error.Syntax, Document.parse(testing.allocator, "[console\nfont = \n"));
+}
+
+test "a value that is not text, a number or a boolean is there but unreadable" {
+    var d = try Document.parse(testing.allocator, "[console]\nfallback-fonts = [\"/a.psf\"]\n");
+    defer d.deinit();
+    try testing.expect(d.has("console", "fallback-fonts"));
+    try testing.expect(d.get("console", "fallback-fonts") == null);
+    try testing.expect(!d.has("console", "font"));
+    var clash = try Document.parse(testing.allocator, "console = 5\n");
+    defer clash.deinit();
+    try testing.expectError(error.InvalidDocument, clash.set("console", "scale", "2"));
 }
