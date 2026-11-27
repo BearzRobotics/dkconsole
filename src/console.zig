@@ -293,25 +293,21 @@ pub const Console = struct {
     }
 
     fn shutdown(self: *Console) void {
-        self.pty.deinit();
-        self.outbox.deinit(self.allocator);
         self.releaseDisplayResources();
         self.input.deinit();
         self.keymap.deinit();
         if (self.dev) |*d| d.close();
-        // Back to a text console for whoever comes next.
+        // Back to a text console for whoever comes next, and first: ending the
+        // login can take a while, and nothing may hold the VT meanwhile.
         self.vtdev.restoreText();
+        self.pty.deinit();
+        self.outbox.deinit(self.allocator);
     }
 
     fn loadSettings(self: *Console) void {
-        const a = self.allocator;
-        if (self.docs_loaded) {
-            self.etc_doc.deinit();
-            self.defs_doc.deinit();
-        }
-        self.etc_doc = configtool.loadDoc(a, configtool.etcPath());
+        self.reloadDoc(&self.etc_doc, configtool.etcPath());
         var dbuf: [std.fs.max_path_bytes]u8 = undefined;
-        self.defs_doc = configtool.loadDoc(a, configtool.defaultsPath(&dbuf));
+        self.reloadDoc(&self.defs_doc, configtool.defaultsPath(&dbuf));
         self.docs_loaded = true;
         self.settings = config.Settings.resolve(.{ .etc = &self.etc_doc, .defaults = &self.defs_doc }, self.vt_num);
         self.scheme = termcore.schemes.scheme(self.settings.colors);
