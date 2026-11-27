@@ -90,6 +90,18 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
     }
 
     const changes = std.mem.eql(u8, cmd, "set") or std.mem.eql(u8, cmd, "reset");
+    // From reading to writing, so that two changes do not undo each other.
+    var lock: ?c_int = null;
+    defer if (lock) |fd| {
+        _ = sys.close(fd);
+    };
+    if (changes) {
+        const path = etcPath();
+        if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| {
+            if (i > 0 and sys.geteuid() == 0) sys.makeDir(path[0..i]);
+        }
+        lock = sys.lockDirectoryOf(path);
+    }
     var broken = false;
     var etc = loadOrReport(allocator, etcPath(), &broken);
     defer etc.deinit();
