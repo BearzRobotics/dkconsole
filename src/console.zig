@@ -52,6 +52,11 @@ const quick_login_ms = 2000;
 const max_login_failures = 5;
 const login_retry_ms = 1000;
 
+/// The longest a program may hold the screen for synchronized output. The
+/// terminal has no clock, so ending a hold that is never released is the
+/// console's job. Ghostty uses the same second.
+const render_hold_ms = 1000;
+
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
 pub const Options = struct { vt: u32 };
@@ -198,7 +203,8 @@ pub const Console = struct {
     term: vt.Terminal = undefined,
     stream: vt.TerminalStream = undefined,
     state: vt.RenderState = .empty,
-    hold: bool = false,
+    /// While set, the program has asked for the screen to stay as it is.
+    hold_until: ?i64 = null,
     pty: Pty = .{ .master = -1, .pid = 0 },
     /// Input the program has not taken yet.
     outbox: termcore.pty.Outbox = .{},
@@ -619,7 +625,7 @@ pub const Console = struct {
         self.term = fresh;
         self.attachStream();
         self.setPrimary("");
-        self.hold = false;
+        self.hold_until = null;
         self.selecting = false;
         self.anchor = null;
         self.pointer_visible = false;
@@ -661,7 +667,17 @@ pub const Console = struct {
     }
 
     fn onRenderHold(handler: *vt.TerminalStream.Handler, hold: bool) void {
-        fromHandler(handler).hold = hold;
+        fromHandler(handler).hold_until = if (hold) nowMs() + render_hold_ms else null;
+    }
+
+    /// Ends a hold that has run too long, and says whether it did.
+    fn expireRenderHold(self: *Console, now: i64) bool {
+        const deadline = self.hold_until orelse return false;
+        if (now < deadline) return false;
+        self.hold_until = null;
+        self.term.modes.set(.synchronized_output, false);
+        self.markAll();
+        return true;
     }
 
     fn onClipboardWrite(handler: *vt.TerminalStream.Handler, write: vt.clipboard.Write) void {
@@ -865,6 +881,7 @@ pub const Console = struct {
                 dirty = true;
             };
             if (self.quit) break;
+            if (self.expireRenderHold(nowMs())) dirty = true;
             if (self.cursor_blink_due(now)) dirty = true;
             if (dirty) self.draw(now);
         }
@@ -877,7 +894,7 @@ pub const Console = struct {
         if (self.have_display and self.settings.cursor_blink) {
             ms = if (ms < 0) 500 else @min(ms, 500);
         }
-        for ([_]?i64{ self.display_retry_at, self.login_retry_at }) |deadline| {
+        for ([_]?i64{ self.display_retry_at, self.login_retry_at, self.hold_until }) |deadline| {
             const left = @max(0, (deadline orelse continue) - nowMs());
             ms = if (ms < 0) left else @min(ms, left);
         }
@@ -998,7 +1015,7 @@ pub const Console = struct {
 
     fn draw(self: *Console, now: i64) void {
         _ = now;
-        if (!self.have_display or self.hold) return;
+        if (!self.have_display or self.hold_until != null) return;
         self.state.update(self.allocator, &self.term) catch return;
 
         // What the renderer says changed, plus the cursor's old and new rows.
@@ -1310,14 +1327,14 @@ test "nothing of a session survives logout" {
     c.stream.nextSlice("\x1b]52;c;aHVudGVyMi1jbGlwYm9hcmQ=\x07");
     try std.testing.expectEqualStrings("hunter2-clipboard", c.primary.items);
     c.stream.nextSlice("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b]11;#000000\x07\x1b]10;#000000\x07\x1b[?2026h");
-    try std.testing.expect(c.hold);
+    try std.testing.expect(c.hold_until != null);
     c.selecting = true;
     c.pointer_visible = true;
 
     c.loginExited();
 
     try std.testing.expectEqual(@as(usize, 0), c.primary.items.len);
-    try std.testing.expect(!c.hold and !c.selecting and !c.pointer_visible);
+    try std.testing.expect(c.hold_until == null and !c.selecting and !c.pointer_visible);
     try std.testing.expect(!c.term.modes.get(.bracketed_paste));
     try std.testing.expectEqual(@as(@TypeOf(c.term.flags.mouse_event), .none), c.term.flags.mouse_event);
     try std.testing.expectEqual(background, c.term.colors.background.get());
@@ -1383,4 +1400,21 @@ test "a login that lasted clears the failure count" {
     try std.testing.expect(!c.quit);
     try std.testing.expectEqual(@as(u32, 0), c.login_failures);
     try std.testing.expect(c.login_running);
+}
+
+test "a render hold that is never released runs out" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    const before = nowMs();
+    c.stream.nextSlice("\x1b[?2026h");
+    const deadline = c.hold_until.?;
+    try std.testing.expect(deadline >= before + render_hold_ms);
+    try std.testing.expect(c.timeoutMs() <= render_hold_ms);
+    try std.testing.expect(!c.expireRenderHold(deadline - 1));
+    try std.testing.expect(c.expireRenderHold(deadline));
+    try std.testing.expect(c.hold_until == null);
+    try std.testing.expect(!c.term.modes.get(.synchronized_output));
+    // Released in time, there is nothing to expire.
+    c.stream.nextSlice("\x1b[?2026h\x1b[?2026l");
+    try std.testing.expect(c.hold_until == null);
 }
