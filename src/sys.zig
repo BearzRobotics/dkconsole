@@ -218,7 +218,13 @@ pub fn makeDir(path: []const u8) void {
 /// left to report them.
 pub fn print(fd: c_int, comptime fmt: []const u8, args: anytype) void {
     var buf: [2048]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, fmt, args) catch &buf;
+    const s = std.fmt.bufPrint(&buf, fmt, args) catch {
+        // A long value, or a log tail in a report: all of it is printed.
+        const long = std.fmt.allocPrint(std.heap.page_allocator, fmt, args) catch return;
+        defer std.heap.page_allocator.free(long);
+        writeAllFd(fd, long) catch {};
+        return;
+    };
     writeAllFd(fd, s) catch {};
 }
 
