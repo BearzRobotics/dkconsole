@@ -40,6 +40,9 @@ const K_BARENUMLOCK: u16 = 0x0213;
 
 const KDGKBENT: c_ulong = 0x4B46;
 const KDGKBDIACRUC: c_ulong = 0x4BFA;
+const KDGKBLED: c_ulong = 0x4B64;
+const LED_NUM = 0x02;
+const LED_CAP = 0x04;
 
 pub const Diacr = extern struct { diacr: u32, base: u32, result: u32 };
 const DiacrTable = extern struct { count: c_uint, entries: [256]Diacr };
@@ -163,7 +166,27 @@ pub const Decoder = struct {
         return idx;
     }
 
-    fn shiftHeld(self: *const Decoder) bool {
+    pub fn ctrlHeld(self: *const Decoder) bool {
+        return self.held[KG_CTRL] > 0 or self.held[KG_CTRLL] > 0 or self.held[KG_CTRLR] > 0;
+    }
+
+    pub fn altHeld(self: *const Decoder) bool {
+        return self.held[KG_ALT] > 0;
+    }
+
+    /// Takes over the kernel's lock keys, as `KDGKBLED` reports them.
+    pub fn setLocks(self: *Decoder, flags: u8) void {
+        self.num = flags & LED_NUM != 0;
+        self.caps = flags & LED_CAP != 0;
+    }
+
+    /// Reads the lock keys of the console on `fd`.
+    pub fn readLocks(self: *Decoder, fd: c_int) void {
+        var flags: u8 = 0;
+        if (sys.ioctl(fd, KDGKBLED, &flags) == 0) self.setLocks(flags);
+    }
+
+    pub fn shiftHeld(self: *const Decoder) bool {
         return self.held[KG_SHIFT] > 0 or self.held[KG_SHIFTL] > 0 or self.held[KG_SHIFTR] > 0;
     }
 
@@ -194,8 +217,8 @@ pub const Decoder = struct {
             .code = code,
             .action = action,
             .shift = self.shiftHeld(),
-            .ctrl = self.held[KG_CTRL] > 0 or self.held[KG_CTRLL] > 0 or self.held[KG_CTRLR] > 0,
-            .alt = self.held[KG_ALT] > 0,
+            .ctrl = self.ctrlHeld(),
+            .alt = self.altHeld(),
             .super = self.meta_left or self.meta_right,
             .caps_lock = self.caps,
             .num_lock = self.num,

@@ -288,6 +288,9 @@ pub const Console = struct {
         self.input = evdev.Input.init(a);
         self.keymap = kbd.Keymap.init(a);
         self.decoder = kbd.Decoder.init(&self.keymap);
+        // The lock keys start as the kernel has them; after that they are
+        // ours, and survive VT switches and new keymaps.
+        self.decoder.readLocks(self.vtdev.fd);
 
         self.setupTerminal() catch |e| {
             log.err("terminal setup failed ({s}); using the plain getty: {s}", .{ @errorName(e), self.settings.fallback });
@@ -528,9 +531,10 @@ pub const Console = struct {
         self.input.open();
         self.have_input = true;
         if (kbd.Keymap.load(self.allocator, self.vtdev.fd)) |km| {
+            // The decoder reads the keymap through a pointer, and keeps its
+            // lock keys.
             self.keymap.deinit();
             self.keymap = km;
-            self.decoder = kbd.Decoder.init(&self.keymap);
         } else |e| log.warn("acquire: cannot read the keymap ({s}); keeping the previous one", .{@errorName(e)});
         log.debug("acquire: {d} input device(s)", .{self.input.devices.items.len});
         self.display_failures = 0;
@@ -1279,7 +1283,7 @@ pub const Console = struct {
         vt.input.encodeMouse(&w, .{
             .action = action,
             .button = button,
-            .mods = .{ .shift = self.decoder.held[0] > 0, .ctrl = self.decoder.held[2] > 0, .alt = self.decoder.held[3] > 0 },
+            .mods = .{ .shift = self.decoder.shiftHeld(), .ctrl = self.decoder.ctrlHeld(), .alt = self.decoder.altHeld() },
             .pos = .{ .x = @floatFromInt(self.pointer_x), .y = @floatFromInt(self.pointer_y) },
         }, opts) catch return;
         self.send(&.{w.buffered()});
@@ -1287,7 +1291,7 @@ pub const Console = struct {
 
     fn pointerMoved(self: *Console, dirty: *bool) void {
         dirty.* = true;
-        const shift = self.decoder.held[0] > 0;
+        const shift = self.decoder.shiftHeld();
         if (self.term.flags.mouse_event != .none and !shift) {
             if (self.term.flags.mouse_event == .any or (self.term.flags.mouse_event == .button and self.selecting))
                 self.sendMouse(.motion, null);
@@ -1298,7 +1302,7 @@ pub const Console = struct {
         const screen = self.term.screens.active;
         const pin = screen.pages.pin(.{ .viewport = .{ .x = cell.col, .y = cell.row } }) orelse return;
         const anchor = self.anchor orelse return;
-        screen.select(vt.Selection.init(anchor, pin, self.decoder.held[3] > 0)) catch return;
+        screen.select(vt.Selection.init(anchor, pin, self.decoder.altHeld())) catch return;
     }
 
     fn handleButton(self: *Console, code: u16, pressed: bool, dirty: *bool) void {
@@ -1309,7 +1313,7 @@ pub const Console = struct {
             evdev.BTN_MIDDLE => .middle,
             else => return,
         };
-        const shift = self.decoder.held[0] > 0;
+        const shift = self.decoder.shiftHeld();
         if (self.term.flags.mouse_event != .none and !shift) {
             self.selecting = pressed;
             self.sendMouse(if (pressed) .press else .release, button);
