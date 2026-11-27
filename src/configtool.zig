@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const termcore = @import("termcore");
+const toml = @import("toml");
 const ini = @import("tomlcfg.zig");
 const config = @import("config.zig");
 const psf = @import("psf.zig");
@@ -23,11 +24,40 @@ pub fn defaultsPath(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}/config.example.toml", .{dir}) catch "";
 }
 
-/// Load a file as a document; a missing or unreadable file is an empty one.
-pub fn loadDoc(allocator: std.mem.Allocator, path: []const u8) ini.Document {
-    const text = sys.readFile(allocator, path, 1 << 20) catch return ini.Document.init(allocator);
+/// Why a settings file could not be used, ready to print.
+pub const Problem = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+
+    pub fn text(self: *const Problem) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn set(self: *Problem, comptime fmt: []const u8, args: anytype) void {
+        var w: std.Io.Writer = .fixed(&self.buf);
+        w.print(fmt, args) catch {};
+        self.len = w.buffered().len;
+    }
+};
+
+/// Loads a file as a document. A missing file is an empty document; anything
+/// else that goes wrong is an error, described in `problem`. Only a missing
+/// file may be treated as empty: writing back over one that merely could not
+/// be read would erase it.
+pub fn loadDoc(allocator: std.mem.Allocator, path: []const u8, problem: *Problem) error{Unusable}!ini.Document {
+    const text = sys.readFile(allocator, path, 1 << 20) catch |e| switch (e) {
+        error.NotFound => return ini.Document.init(allocator),
+        else => {
+            problem.set("cannot read it: {s}", .{@errorName(e)});
+            return error.Unusable;
+        },
+    };
     defer allocator.free(text);
-    return ini.Document.parse(allocator, text) catch ini.Document.init(allocator);
+    var diag: toml.Diagnostic = .{};
+    return ini.Document.parseDiag(allocator, text, &diag) catch |e| {
+        if (diag.line > 0) problem.set("line {d}, column {d}: {s}", .{ diag.line, diag.column, diag.message }) else problem.set("{s}", .{@errorName(e)});
+        return error.Unusable;
+    };
 }
 
 const usage =
@@ -59,20 +89,37 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) u8 {
         rest = rest[2..];
     }
 
-    var etc = loadDoc(allocator, etcPath());
+    const changes = std.mem.eql(u8, cmd, "set") or std.mem.eql(u8, cmd, "reset");
+    var broken = false;
+    var etc = loadOrReport(allocator, etcPath(), &broken);
     defer etc.deinit();
+    if (broken and changes) {
+        sys.print(err_fd, "dkconsole: nothing was changed; repair the file first\n", .{});
+        return 1;
+    }
     var dbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var defs = loadDoc(allocator, defaultsPath(&dbuf));
+    var defs_broken = false;
+    var defs = loadOrReport(allocator, defaultsPath(&dbuf), &defs_broken);
     defer defs.deinit();
     const layers: config.Layers = .{ .etc = &etc, .defaults = &defs };
 
-    if (std.mem.eql(u8, cmd, "list") and rest.len == 0) return list(layers, vt);
-    if (std.mem.eql(u8, cmd, "get") and rest.len == 1) return get(layers, vt, rest[0]);
+    // With an unreadable file these show what is left, and fail.
+    if (std.mem.eql(u8, cmd, "list") and rest.len == 0) return @max(list(layers, vt), @intFromBool(broken));
+    if (std.mem.eql(u8, cmd, "get") and rest.len == 1) return @max(get(layers, vt, rest[0]), @intFromBool(broken));
     if (std.mem.eql(u8, cmd, "set") and rest.len == 2) return set(allocator, &etc, vt, rest[0], rest[1]);
     if (std.mem.eql(u8, cmd, "reset") and rest.len == 1) return reset(allocator, &etc, vt, rest[0]);
     if (std.mem.eql(u8, cmd, "fonts") and rest.len == 0) return fonts(allocator);
     sys.print(err_fd, "{s}", .{usage});
     return 2;
+}
+
+fn loadOrReport(allocator: std.mem.Allocator, path: []const u8, broken: *bool) ini.Document {
+    var problem: Problem = .{};
+    return loadDoc(allocator, path, &problem) catch {
+        sys.print(err_fd, "dkconsole: {s}: {s}\n", .{ path, problem.text() });
+        broken.* = true;
+        return ini.Document.init(allocator);
+    };
 }
 
 fn sourceName(s: config.Source) []const u8 {
@@ -188,4 +235,17 @@ fn fonts(allocator: std.mem.Allocator) u8 {
     for (found) |p| sys.print(out_fd, "  {s}\n", .{p});
     sys.print(out_fd, "Fonts compressed with gzip (.psf.gz) must be unpacked first.\n", .{});
     return 0;
+}
+
+test "only a missing settings file counts as an empty one" {
+    const a = std.testing.allocator;
+    var problem: Problem = .{};
+    var missing = try loadDoc(a, "/nonexistent/dkconsole.toml", &problem);
+    missing.deinit();
+    // A directory exists and cannot be read as a file.
+    try std.testing.expectError(error.Unusable, loadDoc(a, "/proc", &problem));
+    try std.testing.expect(problem.len > 0);
+    // Not TOML: the reason names the line.
+    try std.testing.expectError(error.Unusable, loadDoc(a, "/proc/version", &problem));
+    try std.testing.expect(std.mem.startsWith(u8, problem.text(), "line 1, column "));
 }

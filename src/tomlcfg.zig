@@ -35,9 +35,14 @@ pub const Document = struct {
     /// Parses `text`. A document that is not valid TOML is an error, so the
     /// caller keeps what it had (a full invalid file is never half applied).
     pub fn parse(gpa: Allocator, text: []const u8) !Document {
+        return parseDiag(gpa, text, null);
+    }
+
+    /// `parse`, saying in `diag` where the text is wrong.
+    pub fn parseDiag(gpa: Allocator, text: []const u8, diag: ?*toml.Diagnostic) !Document {
         var self = init(gpa);
         errdefer self.deinit();
-        self.doc = try toml.Document.parse(gpa, text, .{}, null);
+        self.doc = try toml.Document.parse(gpa, text, .{}, diag);
         return self;
     }
 

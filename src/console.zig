@@ -321,6 +321,19 @@ pub const Console = struct {
         });
     }
 
+    /// Reads `path` into `doc`. A file that cannot be used changes nothing: the
+    /// console keeps the settings it had (at start-up, none).
+    fn reloadDoc(self: *Console, doc: *@import("tomlcfg.zig").Document, path: []const u8) void {
+        var problem: configtool.Problem = .{};
+        if (configtool.loadDoc(self.allocator, path, &problem)) |fresh| {
+            if (self.docs_loaded) doc.deinit();
+            doc.* = fresh;
+        } else |_| {
+            log.warn("{s}: {s}; {s}", .{ path, problem.text(), if (self.docs_loaded) "keeping the settings in use" else "ignoring the file" });
+            if (!self.docs_loaded) doc.* = .init(self.allocator);
+        }
+    }
+
     /// A value that fails its check is skipped (a typo must never break the
     /// console), so say which one and why, where the administrator will see it.
     fn warnInvalidSettings(self: *Console) void {
