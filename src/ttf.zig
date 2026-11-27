@@ -437,8 +437,8 @@ const TestFont = struct {
         if (glyf.items.len == 0) try glyf.appendSlice(a, &.{ 0, 0 });
 
         const tables = [_]struct { *const [4]u8, []const u8 }{
-            .{ "head", &head }, .{ "maxp", &maxp },                .{ "hhea", &hhea },
-            .{ "hmtx", &hmtx }, .{ "cmap", self.cmap orelse &format0 }, .{ "loca", loca.items },
+            .{ "head", &head },      .{ "maxp", &maxp },                     .{ "hhea", &hhea },
+            .{ "hmtx", &hmtx },      .{ "cmap", self.cmap orelse &format0 }, .{ "loca", loca.items },
             .{ "glyf", glyf.items },
         };
         var out: std.ArrayList(u8) = .empty;

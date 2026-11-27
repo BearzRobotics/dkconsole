@@ -372,9 +372,9 @@ pub const Console = struct {
         sys.log_level = sys.parseLevel(self.settings.log_level);
         self.warnInvalidSettings();
         log.info("settings: font='{s}' size={d} scale={d} color-scheme={s} scrollback={d} log-level={s} mode='{s}' display='{s}' issue-file='{s}' login-program='{s}'", .{
-            self.settings.font,        self.settings.font_size,        self.settings.scale,
-            self.settings.color_scheme, self.settings.scrollback_lines, self.settings.log_level,
-            self.settings.mode_text,   self.settings.display,          self.settings.issue_file,
+            self.settings.font,          self.settings.font_size,        self.settings.scale,
+            self.settings.color_scheme,  self.settings.scrollback_lines, self.settings.log_level,
+            self.settings.mode_text,     self.settings.display,          self.settings.issue_file,
             self.settings.login_program,
         });
     }
@@ -461,8 +461,8 @@ pub const Console = struct {
         };
         var nb: [32]u8 = undefined;
         log.info("display: connector {d} ({s}), {d}x{d}@{d}, {d}x{d} mm", .{
-            out.connector_id,  drm.connectorName(&nb, out.connector_type, out.connector_type_id), out.width(), out.height(), out.mode.vrefresh,
-            out.mm_width, out.mm_height,
+            out.connector_id, drm.connectorName(&nb, out.connector_type, out.connector_type_id), out.width(), out.height(), out.mode.vrefresh,
+            out.mm_width,     out.mm_height,
         });
         self.dev = d;
         self.out = out;
@@ -554,7 +554,7 @@ pub const Console = struct {
         self.origin_y = (self.out.height() - @as(u32, self.rows) * self.renderer.cell_h) / 2;
         log.info("layout: {s} font, cell {d}x{d}, {d} columns x {d} rows, margin {d},{d}", .{
             if (main_face) "TrueType" else "PSF", self.renderer.cell_w, self.renderer.cell_h,
-            self.cols,                                                  self.rows,                                self.origin_x,
+            self.cols,                            self.rows,            self.origin_x,
             self.origin_y,
         });
     }

@@ -134,9 +134,8 @@ pub fn recoveryStatus(allocator: std.mem.Allocator, vt: u32) void {
         const now = fallback.bootSeconds();
         state.expire(now);
         sys.print(out, "tty{d}: {d} failure(s) in the last {d} s; {s}\n", .{
-            n,                                                                                                                       state.count,
-            fallback.window_seconds,
-            if (state.latched) "latched: every start goes to the plain getty until `dkconsole recovery reset` or reboot" else "the console will start normally",
+            n,                       state.count,
+            fallback.window_seconds, if (state.latched) "latched: every start goes to the plain getty until `dkconsole recovery reset` or reboot" else "the console will start normally",
         });
         if (state.count > 0) {
             sys.print(out, "  failed", .{});

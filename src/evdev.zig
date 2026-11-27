@@ -402,7 +402,7 @@ fn bitsOf(comptime n: usize, set: []const usize) [n]u8 {
 }
 
 test "classify keyboards, mice and tablets" {
-    const ev_kbd = bitsOf(4, &.{EV_SYN, EV_KEY});
+    const ev_kbd = bitsOf(4, &.{ EV_SYN, EV_KEY });
     const keys_kbd = bitsOf(96, &.{ KEY_A, 1 });
     try testing.expectEqual(Kind.keyboard, classify(&ev_kbd, &keys_kbd, &.{}, &.{}).?);
 

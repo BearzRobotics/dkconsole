@@ -438,7 +438,7 @@ pub const Device = struct {
             if (c.connection != DRM_MODE_CONNECTED) continue;
             for (conn.modes[0..conn.mode_count]) |m| {
                 try w.print("  mode {d}x{d}@{d}{s}{s}{s}\n", .{
-                    m.hdisplay,                                                       m.vdisplay,                                                  m.vrefresh,
+                    m.hdisplay,                                                      m.vdisplay,                                                        m.vrefresh,
                     if (m.type & DRM_MODE_TYPE_PREFERRED != 0) " preferred" else "", if (m.flags & DRM_MODE_FLAG_INTERLACE != 0) " interlaced" else "", if (m.flags & DRM_MODE_FLAG_DBLSCAN != 0) " doublescan" else "",
                 });
             }
