@@ -197,8 +197,12 @@ fn groupFor(buf: []u8, vt: u32) []const u8 {
 }
 
 fn save(allocator: std.mem.Allocator, doc: *ini.Document) u8 {
-    const text = doc.toOwnedString(allocator) catch {
-        sys.print(err_fd, "dkconsole: out of memory\n", .{});
+    const text = doc.toOwnedString(allocator) catch |e| {
+        switch (e) {
+            error.OutOfMemory => sys.print(err_fd, "dkconsole: out of memory\n", .{}),
+            error.InvalidValue => sys.print(err_fd, "dkconsole: not changed: a value cannot be written as TOML (is it valid UTF-8?)\n", .{}),
+            else => sys.print(err_fd, "dkconsole: not changed: the settings cannot be written ({s})\n", .{@errorName(e)}),
+        }
         return 1;
     };
     defer allocator.free(text);

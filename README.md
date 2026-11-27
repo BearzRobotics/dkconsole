@@ -38,7 +38,7 @@ dkconsole config reset [--vt N] KEY
 dkconsole config fonts                    fonts it can use on this system
 ```
 
-Writing `config.toml` keeps unknown keys and your comments (toml-zig 0.2.0 or later; comments
+Writing `config.toml` keeps unknown keys and your comments (toml-zig; comments
 inside arrays and inline tables are the one exception), and the file's mode, owner and symlink.
 The long commented documentation lives in `config.example.toml`.
 

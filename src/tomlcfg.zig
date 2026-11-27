@@ -47,8 +47,10 @@ pub const Document = struct {
     }
 
     /// The TOML text of the document; the caller frees it with `allocator`.
+    /// `error.InvalidValue` means something in it has no TOML form, such as
+    /// text that is not UTF-8.
     pub fn toOwnedString(self: *const Document, allocator: Allocator) ![]u8 {
-        if (self.doc) |*d| return d.toOwnedString(allocator) catch error.OutOfMemory;
+        if (self.doc) |*d| return d.toOwnedString(allocator);
         return allocator.dupe(u8, "");
     }
 
@@ -227,4 +229,11 @@ test "a value that is not text, a number or a boolean is there but unreadable" {
     var clash = try Document.parse(testing.allocator, "console = 5\n");
     defer clash.deinit();
     try testing.expectError(error.InvalidDocument, clash.set("console", "scale", "2"));
+}
+
+test "text that is not UTF-8 cannot be written, and says why" {
+    var d = Document.init(testing.allocator);
+    defer d.deinit();
+    try testing.expect(try d.set("console", "issue-file", "/etc/issue\xff"));
+    try testing.expectError(error.InvalidValue, d.toOwnedString(testing.allocator));
 }

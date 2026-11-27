@@ -2,7 +2,10 @@
 
 ## 0.3.0
 
-Fixes from an adversarial review of 0.2.0. Uses DKTermCore (dkterm) 0.2.0.
+Fixes from an adversarial review of 0.2.0. Uses DKTermCore (dkterm) 0.2.1 and toml-zig 0.3.0.
+toml-zig 0.3.0 refuses some config input accepted before, such as a float too large for 64 bits,
+and lays a saved file out a little differently (dotted keys stay dotted). A file it refuses is
+left alone and reported, as above.
 
 ### Behaviour changes
 - **`osc52` is off by default.** Programs can no longer set the paste buffer unless you set
