@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+DKConsole is now under **GPL-2.0-or-later**. Releases up to 0.3.0 were published under the MIT
+License. No other changes: apart from the license lines and the version number, the code is the
+same as 0.3.0.
+
 ## 0.3.0
 
 Fixes from an adversarial review of 0.2.0. Uses DKTermCore (dkterm) 0.2.1 and toml-zig 0.3.0.

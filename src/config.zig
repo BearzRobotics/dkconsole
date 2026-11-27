@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Console settings (SPEC.md 5.11, *Configuration*). One table describes every
 //! key, so the loader and `dkconsole config list/get/set/reset` agree on
 //! names, defaults and what is valid.

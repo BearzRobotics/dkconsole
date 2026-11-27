@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Falling back to a plain text login (SPEC.md 5.11, *Fallback*). The console
 //! must never be the reason a user cannot log in: when it cannot start, or has
 //! been crashing, it `exec`s the fallback getty on the same VT.

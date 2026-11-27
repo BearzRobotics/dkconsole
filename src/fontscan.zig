@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Finds the font files a console can use (SPEC.md 5.11, *Fonts*): PSF files
 //! in the usual console-font directories, and monospace TrueType files under
 //! the system font directories. Used by `dkconsole config fonts`.

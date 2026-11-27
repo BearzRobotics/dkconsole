@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The kernel's VT layer (SPEC.md 5.11, *VT handling*). It is the protocol every
 //! display program uses, so the console coexists with labwc under seatd, or any
 //! other compositor, on another VT.

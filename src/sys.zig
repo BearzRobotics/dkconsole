@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The few libc calls the console uses directly (SPEC.md 5.11). The console
 //! talks to the kernel through file descriptors and ioctls; going through libc
 //! (which Zig's standard library does too) keeps this file short and the same

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `dkconsole config ...` (SPEC.md 5.11, *Configuration tools*): the text
 //! front end to /etc/dkconsole/config.toml. It follows 6.1's static-files rule,
 //! so setting a value that is already in effect writes nothing.

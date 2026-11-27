@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! One console on one VT (SPEC.md 5.11): libghostty-vt for the terminal, a pty
 //! with `login` in it, the kernel's VT layer, DRM for the screen, evdev for the
 //! keyboard and mouse. A single `poll` loop drives all of it, so an idle console

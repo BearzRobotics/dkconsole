@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! KMS through the DRM ioctls, without libdrm (SPEC.md 5.11, *Display*).
 //! The structures are the kernel's `drm.h` and `drm_mode.h`. Rendering is on
 //! the CPU into two dumb buffers that are swapped with page flips, so this

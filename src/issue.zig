@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `/etc/issue` with agetty's backslash escapes (SPEC.md 5.11, *Process
 //! model*). The console prints this before it starts `login`.
 

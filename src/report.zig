@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `dkconsole report` and `dkconsole recovery ...` (SPEC.md 5.11, *Fallback*):
 //! what to run on a machine to say what the console saw and why it did what
 //! it did, and how to clear the crash latch afterwards.

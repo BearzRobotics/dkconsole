@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! TrueType faces for the console (SPEC.md 5.11, *Fonts*, M9). The outlines are
 //! read by the shared `truetype` module; this file scales them to a cell and
 //! fills them with anti-aliasing into 8-bit coverage bitmaps, one per glyph,

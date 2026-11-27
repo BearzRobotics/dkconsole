@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PSF bitmap console fonts (SPEC.md 5.11, *Fonts*). Reads PSF2, the format
 //! of the kernel's own fonts, and PSF1, which the older kbd fonts (and the
 //! built-in Terminus 16) use. A font is a header, a glyph bitmap array and an

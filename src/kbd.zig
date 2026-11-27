@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The kernel's own keymap (SPEC.md 5.11, *Input*): the table `loadkeys`
 //! loaded, read back with `KDGKBENT` and `KDGKBDIACRUC`, and the small state
 //! machine the kernel's keyboard driver runs (shift state, Caps Lock, Num Lock,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! dkconsole: the Linux text console, rebuilt (SPEC.md 5.11).
 //!
 //!     dkconsole --vt N          run on virtual terminal N (what init starts)

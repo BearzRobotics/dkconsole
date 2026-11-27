@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! A few lines of sample text drawn with the console's own font code, for a
 //! font preview (SPEC.md 5.11, *Configuration tools*); nothing in the program
 //! uses it yet. It does

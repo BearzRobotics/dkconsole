@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Input straight from the kernel's evdev nodes (SPEC.md 5.11, *Input*): no
 //! libinput, libevdev, mtdev or udev. Devices are classified by what they
 //! can report, and inotify on /dev/input picks up devices plugged in later

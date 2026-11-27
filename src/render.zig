@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Drawing the terminal's cells into a dumb buffer with PSF bitmap fonts
 //! (SPEC.md 5.11, *Display* and *Fonts*). It reads libghostty-vt's render
 //! state, as dkde-term does, and writes XRGB8888 pixels; there is no

@@ -92,7 +92,7 @@ See the spec's open questions: image protocols, launching a Wayland session from
 
 ## Status
 
-0.3.0 (see `CHANGELOG.md`). The QEMU test passes all 35 checks on a Ubuntu 7.0 kernel with a
+0.3.1 (see `CHANGELOG.md`). The QEMU test passes all 35 checks on a Ubuntu 7.0 kernel with a
 simpledrm display (`scripts/qemu-console-test/run`). It has not been run on real hardware yet;
 start with `docs/HARDWARE-TESTING.md`.
 
@@ -102,7 +102,12 @@ network (`zig build --system zig-pkg`).
 
 ## License
 
-DKConsole is under the MIT License in `LICENSE`. DKTermCore (dkterm), which is built into the
-program, is `LGPL-2.0-or-later` from 0.2.0 on: if you distribute a binary, its terms apply to
-that part. toml-zig and libghostty-vt are MIT. The Terminus font has its own license, in
+Copyright (c) 2026 Dakota James Owen Keeler.
+
+DKConsole is free software under the GNU General Public License, version 2 or (at your option)
+any later version (`GPL-2.0-or-later`). It comes with no warranty. See `LICENSE`. Releases up
+to 0.3.0 were published under the MIT License.
+
+What is built into the program keeps its own license: DKTermCore (dkterm) is
+`LGPL-2.0-or-later`, toml-zig and libghostty-vt are MIT, and the Terminus font's license is in
 `third_party/terminus`.

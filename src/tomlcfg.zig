@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The console's configuration document, on toml-zig.
 //!
 //! The console's settings are all text on the command line (`config set KEY
