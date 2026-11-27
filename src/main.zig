@@ -47,6 +47,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 test {
+    // Only the files named here run their tests. `font.zig` names the font
+    // readers and settings. `truetype.zig` is its own module (see build.zig).
+    _ = @import("font.zig");
+    _ = @import("config.zig");
+    _ = @import("tomlcfg.zig");
+    _ = @import("sample.zig");
+    _ = @import("fontscan.zig");
+    _ = @import("psf.zig");
+    _ = @import("ttf.zig");
+    _ = @import("sys.zig");
     _ = @import("issue.zig");
     _ = @import("report.zig");
     _ = @import("configtool.zig");

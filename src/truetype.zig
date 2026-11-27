@@ -475,7 +475,7 @@ fn loadSystemFont(a: std.mem.Allocator, path: [*:0]const u8) !?[]u8 {
 test "a real font: cmap, outline and advance" {
     const a = std.testing.allocator;
     const path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
-    const bytes = (try loadSystemFont(a, path)) orelse return; // not installed: nothing to check
+    const bytes = (try loadSystemFont(a, path)) orelse return error.SkipZigTest; // not installed
     defer a.free(bytes.ptr[0 .. 32 << 20]);
     const font = try Font.parse(bytes);
     try std.testing.expect(font.units_per_em == 2048);

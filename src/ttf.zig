@@ -358,7 +358,7 @@ test "a square contour fills exactly its pixels" {
 
 test "a real monospace font gets a cell and draws letters" {
     const a = testing.allocator;
-    const data = readSystemFont(a, "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") orelse return;
+    const data = readSystemFont(a, "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") orelse return error.SkipZigTest;
     defer a.free(data);
     var face = try Face.init(a, data, 24);
     defer face.deinit();
@@ -384,7 +384,7 @@ test "a real monospace font gets a cell and draws letters" {
 
 test "resize gives a new cell and drops the cache; a missing glyph is remembered" {
     const a = testing.allocator;
-    const data = readSystemFont(a, "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") orelse return;
+    const data = readSystemFont(a, "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") orelse return error.SkipZigTest;
     defer a.free(data);
     var face = try Face.init(a, data, 24);
     defer face.deinit();

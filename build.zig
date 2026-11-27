@@ -25,7 +25,8 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("terminus16", .{ .root_source_file = b.path("third_party/terminus/Uni3-Terminus16.psf") });
     mod.addAnonymousImport("terminus24", .{ .root_source_file = b.path("third_party/terminus/Uni3-Terminus24x12.psf") });
     mod.addAnonymousImport("terminus32", .{ .root_source_file = b.path("third_party/terminus/Uni3-Terminus32x16.psf") });
-    mod.addImport("truetype", b.createModule(.{ .root_source_file = b.path("src/truetype.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    const truetype = b.createModule(.{ .root_source_file = b.path("src/truetype.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    mod.addImport("truetype", truetype);
 
     const exe = b.addExecutable(.{ .name = "dkconsole", .root_module = mod });
     // A rescue system must not need a dynamic loader.
@@ -35,4 +36,6 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.step("test", "Run the tests");
     tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
+    // A module runs only its own tests.
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = truetype })).step);
 }
