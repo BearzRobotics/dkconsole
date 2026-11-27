@@ -269,8 +269,12 @@ pub const Device = struct {
 
     const Connector = struct {
         info: GetConnector,
+        /// As allocated; only the first `mode_count` and `encoder_count`
+        /// were filled in.
         modes: []ModeInfo,
         encoders: []u32,
+        mode_count: usize,
+        encoder_count: usize,
 
         fn deinit(self: Connector, allocator: std.mem.Allocator) void {
             allocator.free(self.modes);
@@ -299,13 +303,17 @@ pub const Device = struct {
             allocator.free(encs);
             return null;
         }
-        return .{ .info = c2, .modes = modes[0..@min(c2.count_modes, modes.len)], .encoders = encs[0..@min(c2.count_encoders, encs.len)] };
+        return .{ .info = c2, .modes = modes, .encoders = encs, .mode_count = @min(c2.count_modes, modes.len), .encoder_count = @min(c2.count_encoders, encs.len) };
     }
 
     const Resources = struct {
+        /// As allocated; only the first `connector_count` and `crtc_count`
+        /// were filled in.
         connectors: []u32,
         crtcs: []u32,
         encoders: []u32,
+        connector_count: usize,
+        crtc_count: usize,
 
         fn deinit(self: Resources, allocator: std.mem.Allocator) void {
             allocator.free(self.connectors);
@@ -333,9 +341,11 @@ pub const Device = struct {
         };
         if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
         return .{
-            .connectors = connectors[0..@min(res.count_connectors, connectors.len)],
-            .crtcs = crtcs[0..@min(res.count_crtcs, crtcs.len)],
+            .connectors = connectors,
+            .crtcs = crtcs,
             .encoders = encoders,
+            .connector_count = @min(res.count_connectors, connectors.len),
+            .crtc_count = @min(res.count_crtcs, crtcs.len),
         };
     }
 
@@ -346,11 +356,11 @@ pub const Device = struct {
         const want_name = self.wantedDisplay();
         var skipped_for_name = false;
 
-        for (res.connectors) |cid| {
+        for (res.connectors[0..res.connector_count]) |cid| {
             const conn = self.readConnector(allocator, cid) orelse continue;
             defer conn.deinit(allocator);
             const c = conn.info;
-            if (c.connection != DRM_MODE_CONNECTED or conn.modes.len == 0) continue;
+            if (c.connection != DRM_MODE_CONNECTED or conn.mode_count == 0) continue;
             if (want_name.len > 0) {
                 var nb: [32]u8 = undefined;
                 if (!std.mem.eql(u8, connectorName(&nb, c.connector_type, c.connector_type_id), want_name)) {
@@ -358,8 +368,8 @@ pub const Device = struct {
                     continue;
                 }
             }
-            const mode = pickModeFor(conn.modes, self.want) orelse continue;
-            const crtc = self.pickCrtc(c.encoder_id, conn.encoders, res.crtcs) orelse continue;
+            const mode = pickModeFor(conn.modes[0..conn.mode_count], self.want) orelse continue;
+            const crtc = self.pickCrtc(c.encoder_id, conn.encoders[0..conn.encoder_count], res.crtcs[0..res.crtc_count]) orelse continue;
             return .{ .connector_id = cid, .crtc_id = crtc, .mode = mode, .mm_width = c.mm_width, .mm_height = c.mm_height, .connector_type = c.connector_type, .connector_type_id = c.connector_type_id };
         }
         if (skipped_for_name) log.warn("no connected display is named {s}; see `dkconsole report` for the names", .{want_name});
@@ -381,8 +391,8 @@ pub const Device = struct {
         try w.print("driver {s}\n", .{self.driver(&db)});
         const res = self.readResources(allocator) catch |e| return w.print("cannot read the display resources: {s}\n", .{@errorName(e)});
         defer res.deinit(allocator);
-        try w.print("{d} connector(s), {d} crtc(s)\n", .{ res.connectors.len, res.crtcs.len });
-        for (res.connectors) |cid| {
+        try w.print("{d} connector(s), {d} crtc(s)\n", .{ res.connector_count, res.crtc_count });
+        for (res.connectors[0..res.connector_count]) |cid| {
             const conn = self.readConnector(allocator, cid) orelse {
                 try w.print("connector {d}: cannot be read\n", .{cid});
                 continue;
@@ -395,9 +405,9 @@ pub const Device = struct {
                 2 => "disconnected",
                 else => "unknown",
             };
-            try w.print("connector {d} {s}: {s}, {d}x{d} mm, {d} mode(s)\n", .{ cid, connectorName(&nb, c.connector_type, c.connector_type_id), state, c.mm_width, c.mm_height, conn.modes.len });
+            try w.print("connector {d} {s}: {s}, {d}x{d} mm, {d} mode(s)\n", .{ cid, connectorName(&nb, c.connector_type, c.connector_type_id), state, c.mm_width, c.mm_height, conn.mode_count });
             if (c.connection != DRM_MODE_CONNECTED) continue;
-            for (conn.modes) |m| {
+            for (conn.modes[0..conn.mode_count]) |m| {
                 try w.print("  mode {d}x{d}@{d}{s}{s}{s}\n", .{
                     m.hdisplay,                                                       m.vdisplay,                                                  m.vrefresh,
                     if (m.type & DRM_MODE_TYPE_PREFERRED != 0) " preferred" else "", if (m.flags & DRM_MODE_FLAG_INTERLACE != 0) " interlaced" else "", if (m.flags & DRM_MODE_FLAG_DBLSCAN != 0) " doublescan" else "",

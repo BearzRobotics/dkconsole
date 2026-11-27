@@ -32,7 +32,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (args.items.len == 2 and std.mem.eql(u8, args.items[0], "--vt")) {
         const n = std.fmt.parseInt(u32, args.items[1], 10) catch 0;
-        if (n >= 1 and n <= 63) std.process.exit(console.run(arena, .{ .vt = n }));
+        // The console runs for months, reloading fonts and keymaps as it goes:
+        // it needs an allocator that takes memory back. The arena above suits
+        // the commands that run once and exit.
+        if (n >= 1 and n <= 63) std.process.exit(console.run(std.heap.c_allocator, .{ .vt = n }));
     }
     const usage =
         \\usage: dkconsole --vt N          run on virtual terminal N

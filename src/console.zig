@@ -107,6 +107,7 @@ const FontSet = struct {
         try self.fonts.append(a, f);
         errdefer _ = self.fonts.pop();
         try self.ptrs.append(a, f);
+        errdefer _ = self.ptrs.pop();
         if (owned) |o| try self.data.append(a, o);
     }
 
@@ -1320,6 +1321,11 @@ fn destroyTestConsole(c: *Console) void {
     c.pty.deinit();
     c.outbox.deinit(a);
     c.primary.deinit(a);
+    c.fonts.deinit(a);
+    if (c.docs_loaded) {
+        c.etc_doc.deinit();
+        c.defs_doc.deinit();
+    }
     for (&c.damage) |*d| d.rows.deinit(a);
     c.deinitTerminal();
     a.destroy(c);
@@ -1461,4 +1467,49 @@ test "a hung-up terminal with a running program does not spin the loop" {
     try std.testing.expect(c.login_running);
     // What the program wrote after reopening the terminal still arrived.
     try std.testing.expect(try screenHas(c, "back"));
+}
+
+/// A screen of `w` by `h` pixels, as far as laying out text goes.
+fn setTestOutput(c: *Console, w: u16, h: u16) void {
+    c.out.mode = std.mem.zeroes(drm.ModeInfo);
+    c.out.mode.hdisplay = w;
+    c.out.mode.vdisplay = h;
+    c.out.mm_height = 0;
+}
+
+// The testing allocator reports leaks and double frees: what the console does
+// again and again over its life must free what it replaces.
+test "reloads, relayouts, selections and logouts free what they replace" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    setTestOutput(c, 1920, 1080);
+    const dejavu = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    const fonts = [_][]const u8{ "", "terminus-32", dejavu, "/etc/hostname", "/nonexistent" };
+    var dirty = false;
+    for (0..3) |_| {
+        for (fonts) |font| {
+            c.settings.font = font;
+            c.settings.fallback_fonts = if (font.len == 0) dejavu else "/etc/hostname";
+            try c.buildLayout();
+            c.resizeTerminal();
+            c.stream.nextSlice("some text to draw and select\r\n");
+            try c.state.update(c.allocator, &c.term);
+            for (c.renderer.faces) |face| _ = face.coverage('A', false, false, c.renderer.cell_w);
+        }
+        // Reading the settings again, as after a change to the file.
+        c.loadSettings();
+        c.reloadConfig(&dirty);
+        c.settings.login_program = "/bin/true";
+        c.settings.issue_file = "/etc/hostname";
+        c.pointer_y = 0;
+        c.pointer_x = 0;
+        c.handleButton(evdev.BTN_LEFT, true, &dirty);
+        c.pointer_x = 200;
+        c.pointerMoved(&dirty);
+        c.handleButton(evdev.BTN_LEFT, false, &dirty);
+        for (&c.damage) |*d| d.full = false;
+        c.markRow(40);
+        c.markRow(3);
+        c.loginExited();
+    }
 }
