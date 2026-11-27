@@ -84,6 +84,7 @@ pub fn check(key: *const Key, value: []const u8) ?[]const u8 {
                 return "not one of the known choices";
             }
             if (std.mem.eql(u8, key.name, "mode") and drm.ModeRequest.parse(value) == null) return "expected WIDTHxHEIGHT or WIDTHxHEIGHT@HZ";
+            if (std.mem.eql(u8, key.name, "fallback") and (value.len == 0 or value[0] != '/')) return "must be a command starting with an absolute path";
             if (std.mem.eql(u8, key.name, "login-program") and value.len > 0 and value[0] != '/') return "must be an absolute path";
             if (std.mem.eql(u8, key.name, "display") and std.mem.indexOfAny(u8, value, " /\t") != null) return "expected a connector name such as HDMI-A-1";
             if (std.mem.eql(u8, key.name, "issue-file") and value.len > 0 and value[0] != '/') return "must be an absolute path";
@@ -257,6 +258,9 @@ test "check explains refusals" {
     try testing.expect(check(find("display").?, "HDMI A") != null);
     try testing.expect(check(find("login-program").?, "/bin/login") == null);
     try testing.expect(check(find("login-program").?, "login") != null);
+    try testing.expect(check(find("fallback").?, "/sbin/agetty --noclear tty%N linux") == null);
+    try testing.expect(check(find("fallback").?, "agetty tty%N") != null);
+    try testing.expect(check(find("fallback").?, "") != null);
     try testing.expect(check(find("colors").?, "campbell") == null);
     try testing.expect(check(find("colors").?, "x") != null);
     try testing.expect(check(find("cursor-blink").?, "true") == null);
