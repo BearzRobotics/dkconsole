@@ -288,28 +288,36 @@ pub const Device = struct {
         }
     };
 
+    /// How often to start over when the lists grow between being counted and
+    /// being read, as when a monitor is plugged in. The kernel fills a list
+    /// only if there is room for all of it.
+    const read_attempts = 4;
+
     /// GETCONNECTOR twice, the first time for the counts. The caller frees.
     fn readConnector(self: *Device, allocator: std.mem.Allocator, cid: u32) ?Connector {
-        var c: GetConnector = .{ .connector_id = cid };
-        if (!call(self.fd, IOCTL_GETCONNECTOR, &c)) return null;
-        const modes = allocator.alloc(ModeInfo, c.count_modes) catch return null;
-        const encs = allocator.alloc(u32, c.count_encoders) catch {
-            allocator.free(modes);
-            return null;
-        };
-        var c2: GetConnector = .{
-            .connector_id = cid,
-            .modes_ptr = @intFromPtr(modes.ptr),
-            .encoders_ptr = @intFromPtr(encs.ptr),
-            .count_modes = c.count_modes,
-            .count_encoders = c.count_encoders,
-        };
-        if (!call(self.fd, IOCTL_GETCONNECTOR, &c2)) {
+        for (0..read_attempts) |_| {
+            var c: GetConnector = .{ .connector_id = cid };
+            if (!call(self.fd, IOCTL_GETCONNECTOR, &c)) return null;
+            const modes = allocator.alloc(ModeInfo, c.count_modes) catch return null;
+            const encs = allocator.alloc(u32, c.count_encoders) catch {
+                allocator.free(modes);
+                return null;
+            };
+            var c2: GetConnector = .{
+                .connector_id = cid,
+                .modes_ptr = @intFromPtr(modes.ptr),
+                .encoders_ptr = @intFromPtr(encs.ptr),
+                .count_modes = c.count_modes,
+                .count_encoders = c.count_encoders,
+            };
+            const read = call(self.fd, IOCTL_GETCONNECTOR, &c2);
+            if (read and c2.count_modes <= modes.len and c2.count_encoders <= encs.len)
+                return .{ .info = c2, .modes = modes, .encoders = encs, .mode_count = c2.count_modes, .encoder_count = c2.count_encoders };
             allocator.free(modes);
             allocator.free(encs);
-            return null;
+            if (!read) return null;
         }
-        return .{ .info = c2, .modes = modes, .encoders = encs, .mode_count = @min(c2.count_modes, modes.len), .encoder_count = @min(c2.count_encoders, encs.len) };
+        return null;
     }
 
     const Resources = struct {
@@ -329,30 +337,37 @@ pub const Device = struct {
     };
 
     fn readResources(self: *Device, allocator: std.mem.Allocator) Error!Resources {
-        var res: CardRes = .{};
-        if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
-        const connectors = try allocator.alloc(u32, res.count_connectors);
-        errdefer allocator.free(connectors);
-        const crtcs = try allocator.alloc(u32, res.count_crtcs);
-        errdefer allocator.free(crtcs);
-        const encoders = try allocator.alloc(u32, res.count_encoders);
-        errdefer allocator.free(encoders);
-        res = .{
-            .connector_id_ptr = @intFromPtr(connectors.ptr),
-            .crtc_id_ptr = @intFromPtr(crtcs.ptr),
-            .encoder_id_ptr = @intFromPtr(encoders.ptr),
-            .count_connectors = res.count_connectors,
-            .count_crtcs = res.count_crtcs,
-            .count_encoders = res.count_encoders,
-        };
-        if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
-        return .{
-            .connectors = connectors,
-            .crtcs = crtcs,
-            .encoders = encoders,
-            .connector_count = @min(res.count_connectors, connectors.len),
-            .crtc_count = @min(res.count_crtcs, crtcs.len),
-        };
+        for (0..read_attempts) |_| {
+            var res: CardRes = .{};
+            if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
+            const connectors = try allocator.alloc(u32, res.count_connectors);
+            errdefer allocator.free(connectors);
+            const crtcs = try allocator.alloc(u32, res.count_crtcs);
+            errdefer allocator.free(crtcs);
+            const encoders = try allocator.alloc(u32, res.count_encoders);
+            errdefer allocator.free(encoders);
+            res = .{
+                .connector_id_ptr = @intFromPtr(connectors.ptr),
+                .crtc_id_ptr = @intFromPtr(crtcs.ptr),
+                .encoder_id_ptr = @intFromPtr(encoders.ptr),
+                .count_connectors = res.count_connectors,
+                .count_crtcs = res.count_crtcs,
+                .count_encoders = res.count_encoders,
+            };
+            if (!call(self.fd, IOCTL_GETRESOURCES, &res)) return error.NoOutput;
+            if (res.count_connectors <= connectors.len and res.count_crtcs <= crtcs.len and res.count_encoders <= encoders.len)
+                return .{
+                    .connectors = connectors,
+                    .crtcs = crtcs,
+                    .encoders = encoders,
+                    .connector_count = res.count_connectors,
+                    .crtc_count = res.count_crtcs,
+                };
+            allocator.free(connectors);
+            allocator.free(crtcs);
+            allocator.free(encoders);
+        }
+        return error.NoOutput;
     }
 
     /// Find the wanted (`display`) or else first connected connector, its mode
