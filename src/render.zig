@@ -164,7 +164,7 @@ pub const Renderer = struct {
             } else if (!self.blank(cp)) self.box(buf, px, py, fg);
         }
         const s = self.scale;
-        if (flags.underline != .none) fill(buf, px, py + self.cell_h - 2 * s, w, s, fg);
+        if (flags.underline != .none) fill(buf, px, py + (self.cell_h -| 2 * s), w, s, fg);
         if (flags.strikethrough) fill(buf, px, py + self.cell_h / 2, w, s, fg);
         if (flags.overline) fill(buf, px, py, w, s, fg);
     }

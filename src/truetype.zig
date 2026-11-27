@@ -10,6 +10,11 @@ pub const Error = error{ BadFont, Unsupported };
 /// The most points one glyph may have (real glyphs have a few hundred).
 const max_points = 4096;
 
+/// What drawing one glyph may use in all, its composite parts included. Depth
+/// alone does not bound the work: a few levels that each name the next many
+/// times run for hours.
+const Budget = struct { parts: u32 = 128, points: u32 = 4 * max_points };
+
 fn u16At(d: []const u8, off: usize) Error!u16 {
     if (off + 2 > d.len) return error.BadFont;
     return std.mem.readInt(u16, d[off..][0..2], .big);
@@ -155,7 +160,7 @@ pub const Font = struct {
                         lo = mid + 1;
                     } else {
                         const first = u32At(d, g + 8) catch return null;
-                        const gid = first + (code - start);
+                        const gid = std.math.add(u32, first, code - start) catch return null;
                         return if (gid == 0 or gid > 0xFFFF) null else @intCast(gid);
                     }
                 }
@@ -221,14 +226,15 @@ pub const Font = struct {
     /// Sends the outline of `gid` to `sink` in font units, y up. `sink` has
     /// `moveTo(x, y)`, `lineTo(x, y)`, `quadTo(cx, cy, x, y)` and `close()`.
     pub fn outline(self: Font, gid: u16, sink: anytype) Error!void {
-        try self.outlineAt(gid, sink, .{ 1, 0, 0, 1, 0, 0 }, 0);
+        var budget: Budget = .{};
+        try self.outlineAt(gid, sink, .{ 1, 0, 0, 1, 0, 0 }, 0, &budget);
     }
 
-    fn outlineAt(self: Font, gid: u16, sink: anytype, m: [6]f64, depth: u8) Error!void {
+    fn outlineAt(self: Font, gid: u16, sink: anytype, m: [6]f64, depth: u8, budget: *Budget) Error!void {
         if (depth > 6) return error.BadFont;
         const g = (try self.glyphRange(gid)) orelse return;
         const ncont = try i16At(g, 0);
-        if (ncont >= 0) return self.simple(g, @intCast(ncont), sink, m);
+        if (ncont >= 0) return self.simple(g, @intCast(ncont), sink, m, budget);
         // Composite glyph: pieces, each placed by an offset and a transform.
         var p: usize = 10;
         while (true) {
@@ -277,17 +283,20 @@ pub const Font = struct {
             }
             // child space -> this glyph's space -> the parent's `m`.
             const local = [6]f64{ a, b, c, d, dx, dy };
-            try self.outlineAt(child, sink, mul(local, m), depth + 1);
+            if (budget.parts == 0) return error.BadFont;
+            budget.parts -= 1;
+            try self.outlineAt(child, sink, mul(local, m), depth + 1, budget);
             if (flags & 0x0020 == 0) break; // MORE_COMPONENTS
         }
     }
 
-    fn simple(self: Font, g: []const u8, ncont: usize, sink: anytype, m: [6]f64) Error!void {
+    fn simple(self: Font, g: []const u8, ncont: usize, sink: anytype, m: [6]f64, budget: *Budget) Error!void {
         _ = self;
         if (ncont == 0) return;
         const end_pts = 10;
         const npts = @as(usize, try u16At(g, end_pts + (ncont - 1) * 2)) + 1;
-        if (npts > max_points) return error.BadFont;
+        if (npts > max_points or npts > budget.points) return error.BadFont;
+        budget.points -= @intCast(npts);
         const ilen = try u16At(g, end_pts + ncont * 2);
         var p: usize = end_pts + ncont * 2 + 2 + ilen;
         // Flags, with repeats.

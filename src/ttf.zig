@@ -58,7 +58,8 @@ pub const Face = struct {
         const w: f32 = @as(f32, @floatFromInt(self.font.advance(m))) * self.scale;
         self.cell_w = std.math.clamp(@as(u32, @intFromFloat(@round(w))), 2, 1024);
         self.cell_h = h;
-        self.baseline = @min(h, @as(u32, @intFromFloat(@round(asc * self.scale))));
+        // An odd font may put its ascender below the baseline, or far above.
+        self.baseline = @intFromFloat(std.math.clamp(@round(asc * self.scale), 0, @as(f32, @floatFromInt(h))));
     }
 
     /// The same face at another cell height, without reading the file again.
@@ -397,4 +398,111 @@ test "resize gives a new cell and drops the cache; a missing glyph is remembered
     try testing.expect(face.coverage(0x10FFFD, false, false, face.cell_w) == null);
     try testing.expect(face.coverage(0x10FFFD, false, false, face.cell_w) == null);
     try testing.expectEqual(@as(usize, 1), face.cache.count());
+}
+
+/// A minimal font file around one part under test.
+const TestFont = struct {
+    ascender: i16 = 800,
+    descender: i16 = -200,
+    advance: u16 = 500,
+    /// Null: format 0, every code below 256 is glyph 1.
+    cmap: ?[]const u8 = null,
+    glyphs: []const []const u8 = &.{""},
+
+    fn build(self: TestFont, a: std.mem.Allocator) ![]u8 {
+        var head: [54]u8 = @splat(0);
+        std.mem.writeInt(u16, head[18..20], 1000, .big);
+        std.mem.writeInt(u16, head[50..52], 1, .big); // long loca
+        var maxp: [6]u8 = .{ 0, 1, 0, 0, 0, 0 };
+        std.mem.writeInt(u16, maxp[4..6], @intCast(self.glyphs.len), .big);
+        var hhea: [36]u8 = @splat(0);
+        std.mem.writeInt(i16, hhea[4..6], self.ascender, .big);
+        std.mem.writeInt(i16, hhea[6..8], self.descender, .big);
+        std.mem.writeInt(u16, hhea[34..36], 1, .big);
+        var hmtx: [4]u8 = @splat(0);
+        std.mem.writeInt(u16, hmtx[0..2], self.advance, .big);
+        const every_code: [256]u8 = @splat(1);
+        const format0 = [_]u8{ 0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12, 0, 0, 1, 6, 0, 0 } ++ every_code;
+
+        var glyf: std.ArrayList(u8) = .empty;
+        defer glyf.deinit(a);
+        var loca: std.ArrayList(u8) = .empty;
+        defer loca.deinit(a);
+        for (0..self.glyphs.len + 1) |i| {
+            try loca.appendSlice(a, &std.mem.toBytes(std.mem.nativeToBig(u32, @intCast(glyf.items.len))));
+            if (i < self.glyphs.len) try glyf.appendSlice(a, self.glyphs[i]);
+        }
+        if (glyf.items.len == 0) try glyf.appendSlice(a, &.{ 0, 0 });
+
+        const tables = [_]struct { *const [4]u8, []const u8 }{
+            .{ "head", &head }, .{ "maxp", &maxp },                .{ "hhea", &hhea },
+            .{ "hmtx", &hmtx }, .{ "cmap", self.cmap orelse &format0 }, .{ "loca", loca.items },
+            .{ "glyf", glyf.items },
+        };
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(a);
+        try out.appendSlice(a, &.{ 0, 1, 0, 0, 0, tables.len, 0, 0, 0, 0, 0, 0 });
+        var offset: u32 = 12 + 16 * tables.len;
+        for (tables) |t| {
+            try out.appendSlice(a, t[0]);
+            for ([_]u32{ 0, offset, @intCast(t[1].len) }) |v| try out.appendSlice(a, &std.mem.toBytes(std.mem.nativeToBig(u32, v)));
+            offset += @intCast(t[1].len);
+        }
+        for (tables) |t| try out.appendSlice(a, t[1]);
+        return out.toOwnedSlice(a);
+    }
+};
+
+test "an ascender below the baseline does not crash" {
+    const a = testing.allocator;
+    const data = try (TestFont{ .ascender = -100, .descender = -900 }).build(a);
+    defer a.free(data);
+    var face = try Face.init(a, data, 16);
+    defer face.deinit();
+    try testing.expectEqual(@as(u32, 0), face.baseline);
+}
+
+test "a glyph number that overflows is no glyph" {
+    const a = testing.allocator;
+    // Format 12: one group over all of Unicode, starting at glyph 0xFFFFFFFF.
+    const cmap = [_]u8{ 0, 0, 0, 1, 0, 3, 0, 10, 0, 0, 0, 12 } ++
+        [_]u8{ 0, 12, 0, 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 0, 1 } ++
+        [_]u8{ 0, 0, 0, 0, 0, 0x10, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    const data = try (TestFont{ .cmap = &cmap }).build(a);
+    defer a.free(data);
+    var face = try Face.init(a, data, 16);
+    defer face.deinit();
+    try testing.expect(!face.has('M'));
+}
+
+test "composite glyphs cannot multiply without limit" {
+    const a = testing.allocator;
+    const parts = 60;
+    // Glyphs 1 to 6 are each the next one, sixty times over: 60^6 in all.
+    var composites: [6][10 + 6 * parts]u8 = undefined;
+    var glyphs: [8][]const u8 = undefined;
+    glyphs[0] = "";
+    for (&composites, 1..) |*g, i| {
+        @memset(g, 0);
+        g[0] = 0xFF;
+        g[1] = 0xFF; // -1 contours: composite
+        for (0..parts) |n| {
+            const part = g[10 + 6 * n ..][0..6];
+            part[1] = if (n + 1 < parts) 0x22 else 0x02; // more parts follow
+            part[3] = @intCast(i + 1);
+        }
+        glyphs[i] = g;
+    }
+    glyphs[7] = &@as([10]u8, @splat(0));
+    const data = try (TestFont{ .glyphs = &glyphs }).build(a);
+    defer a.free(data);
+    const font = try truetype.Font.parse(data);
+    const Nothing = struct {
+        pub fn moveTo(_: *@This(), _: f64, _: f64) void {}
+        pub fn lineTo(_: *@This(), _: f64, _: f64) void {}
+        pub fn quadTo(_: *@This(), _: f64, _: f64, _: f64, _: f64) void {}
+        pub fn close(_: *@This()) void {}
+    };
+    var sink: Nothing = .{};
+    try testing.expectError(error.BadFont, font.outline(1, &sink));
 }

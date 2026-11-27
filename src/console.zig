@@ -62,6 +62,10 @@ const render_hold_ms = 1000;
 /// can open the terminal again.
 const hangup_wait_ms = 100;
 
+/// A main font must leave at least this many cells on the screen.
+const min_cols = 20;
+const min_rows = 5;
+
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
 pub const Options = struct { vt: u32 };
@@ -430,6 +434,10 @@ pub const Console = struct {
 
     /// Fonts, then the grid that fits the screen.
     fn buildLayout(self: *Console) !void {
+        return self.buildLayoutWith(self.settings.font);
+    }
+
+    fn buildLayoutWith(self: *Console, font: []const u8) !void {
         const a = self.allocator;
         var set: FontSet = .{};
         errdefer set.deinit(a);
@@ -440,9 +448,9 @@ pub const Console = struct {
         var builtin_height: ?u32 = null;
         // `config fonts` lists the built-in fonts by name: terminus-16, -24 and -32.
         for (psf.builtin_data) |b| {
-            if (std.mem.eql(u8, b.name, self.settings.font)) builtin_height = std.fmt.parseInt(u32, b.name["terminus-".len..], 10) catch null;
+            if (std.mem.eql(u8, b.name, font)) builtin_height = std.fmt.parseInt(u32, b.name["terminus-".len..], 10) catch null;
         }
-        if (builtin_height == null and self.settings.font.len > 0) main_ok = set.addFile(a, self.settings.font, h);
+        if (builtin_height == null and font.len > 0) main_ok = set.addFile(a, font, h);
         // A TrueType cell is not half as wide as it is tall: shrink until 80 columns fit.
         const main_face = main_ok and set.faces.items.len > 0;
         if (main_face) {
@@ -458,6 +466,19 @@ pub const Console = struct {
         // The built-in fonts of the same size back up a font from disk.
         if (main_ok and set.fonts.items.len > 0) try set.addBuiltin(a, set.fonts.items[0].height);
         if (main_ok and set.fonts.items.len == 0) try set.addBuiltin(a, 16);
+
+        // A font with huge cells (damaged, or just too big for this screen)
+        // is not used: the built-in one is.
+        if (main_ok) {
+            const cell_w = if (main_face) set.faces.items[0].cell_w else set.fonts.items[0].width * self.settings.scale;
+            const cell_h = if (main_face) set.faces.items[0].cell_h else set.fonts.items[0].height * self.settings.scale;
+            if (self.out.width() / cell_w < min_cols or self.out.height() / cell_h < min_rows) {
+                log.warn("font {s}: its {d}x{d} cells do not fit this screen; using the built-in font", .{ font, cell_w, cell_h });
+                set.deinit(a);
+                set = .{};
+                return self.buildLayoutWith("");
+            }
+        }
 
         self.fonts.deinit(a);
         self.fonts = set;
@@ -1544,4 +1565,17 @@ test "a TrueType fallback does not become the main font" {
     // The main font draws what it has; the face only what it lacks.
     try std.testing.expect(c.renderer.glyphFor('A', false, false).? == .bitmap);
     try std.testing.expect(c.renderer.glyphFor(0x1E9E, false, false).? == .coverage);
+}
+
+test "a font too big for the screen is not used" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    const dejavu = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    if (!sys.exists(dejavu)) return error.SkipZigTest;
+    // Too narrow to shrink into: 8 pixels high is the smallest tried.
+    setTestOutput(c, 64, 480);
+    c.settings.font = dejavu;
+    try c.buildLayout();
+    try std.testing.expect(!c.renderer.main_face);
+    try std.testing.expect(@as(u32, c.cols) * c.renderer.cell_w <= 64 or c.renderer.cell_w == 8);
 }
