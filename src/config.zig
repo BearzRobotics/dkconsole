@@ -37,6 +37,9 @@ pub const keys = [_]Key{
     .{ .name = "scrollback-lines", .kind = .int, .default = "2000", .min = 0, .max = 100000 },
     .{ .name = "cursor-blink", .kind = .boolean, .default = "false" },
     .{ .name = "fallback", .kind = .string, .default = "/sbin/agetty --noclear tty%N linux" },
+    // Off at a login console: any output, a displayed file included, could
+    // otherwise choose what the next paste types.
+    .{ .name = "osc52", .kind = .boolean, .default = "false" },
     .{ .name = "log-level", .kind = .string, .default = "info", .choices = &.{ "error", "warn", "info", "debug" } },
     .{ .name = "image-memory", .kind = .int, .default = "32", .min = 0, .max = 4096 },
 };
@@ -113,6 +116,7 @@ pub const Settings = struct {
     colors: []const u8,
     scrollback_lines: u32,
     cursor_blink: bool,
+    osc52: bool,
     fallback: []const u8,
     image_memory_mb: u32,
     log_level: []const u8,
@@ -139,6 +143,7 @@ pub const Settings = struct {
             .colors = L.get(layers, vt, "colors"),
             .scrollback_lines = L.int(layers, vt, "scrollback-lines"),
             .cursor_blink = ini.parseBool(L.get(layers, vt, "cursor-blink")) orelse false,
+            .osc52 = ini.parseBool(L.get(layers, vt, "osc52")) orelse false,
             .fallback = L.get(layers, vt, "fallback"),
             .image_memory_mb = L.int(layers, vt, "image-memory"),
             .log_level = L.get(layers, vt, "log-level"),

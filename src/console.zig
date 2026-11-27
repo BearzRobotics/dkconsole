@@ -66,6 +66,9 @@ const hangup_wait_ms = 100;
 const min_cols = 20;
 const min_rows = 5;
 
+/// The most a program may put in the paste buffer.
+const max_osc52_bytes = 1 << 20;
+
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
 pub const Options = struct { vt: u32 };
@@ -731,8 +734,9 @@ pub const Console = struct {
 
     fn onClipboardWrite(handler: *vt.TerminalStream.Handler, write: vt.clipboard.Write) void {
         const self = fromHandler(handler);
+        if (!self.settings.osc52) return;
         for (write.contents) |c| {
-            if (!std.mem.eql(u8, c.mime, "text/plain")) continue;
+            if (!std.mem.eql(u8, c.mime, "text/plain") or c.data.len > max_osc52_bytes) continue;
             self.setPrimary(c.data);
             return;
         }
@@ -1380,6 +1384,7 @@ test "nothing of a session survives logout" {
 
     // Output, a clipboard write, then the alternate screen with modes, black
     // on black, and a synchronized update left open.
+    c.settings.osc52 = true;
     c.stream.nextSlice("TOPSECRET-FIRST-USER\r\n");
     c.stream.nextSlice("\x1b]52;c;aHVudGVyMi1jbGlwYm9hcmQ=\x07");
     try std.testing.expectEqualStrings("hunter2-clipboard", c.primary.items);
@@ -1586,4 +1591,15 @@ test "a font too big for the screen is not used" {
     try c.buildLayout();
     try std.testing.expect(!c.renderer.main_face);
     try std.testing.expect(@as(u32, c.cols) * c.renderer.cell_w <= 64 or c.renderer.cell_w == 8);
+}
+
+test "programs set the paste buffer only when allowed to" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.setPrimary("selected by hand");
+    c.stream.nextSlice("\x1b]52;c;aW5qZWN0ZWQ=\x07"); // "injected"
+    try std.testing.expectEqualStrings("selected by hand", c.primary.items);
+    c.settings.osc52 = true;
+    c.stream.nextSlice("\x1b]52;c;aW5qZWN0ZWQ=\x07");
+    try std.testing.expectEqualStrings("injected", c.primary.items);
 }

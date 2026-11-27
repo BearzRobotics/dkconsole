@@ -41,8 +41,12 @@ scrollback-lines = 2000
 # Blinking cursors blink only on the VT you are looking at. Off wakes the
 # machine less.
 cursor-blink = false
+# Let programs put text in the paste buffer (OSC 52), up to 1 MiB. Off, only
+# what you select with the mouse is pasted: otherwise any output, even a file
+# being displayed, chooses what your next paste types.
+osc52 = false
 # What to run when the console cannot start (no display) or has crashed three
-# times in a row. %N is the VT number.
+# times within a minute. %N is the VT number.
 fallback = "/sbin/agetty --noclear tty%N linux"
 # How much the console writes to standard error, where the init system collects
 # it: error, warn, info or debug. info says what was set up (display, font,
