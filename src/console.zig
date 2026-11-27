@@ -57,6 +57,11 @@ const login_retry_ms = 1000;
 /// console's job. Ghostty uses the same second.
 const render_hold_ms = 1000;
 
+/// While nothing has the terminal open, its master is always ready to read.
+/// It is left out of `poll` this long, then looked at again: a running program
+/// can open the terminal again.
+const hangup_wait_ms = 100;
+
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
 pub const Options = struct { vt: u32 };
@@ -206,6 +211,7 @@ pub const Console = struct {
     /// While set, the program has asked for the screen to stay as it is.
     hold_until: ?i64 = null,
     pty: Pty = .{ .master = -1, .pid = 0 },
+    pty_resume_at: ?i64 = null,
     /// Input the program has not taken yet.
     outbox: termcore.pty.Outbox = .{},
     login_running: bool = false,
@@ -796,6 +802,7 @@ pub const Console = struct {
         log.info("login ended; starting it again", .{});
         const quick = self.login_started_at != 0 and nowMs() - self.login_started_at < quick_login_ms;
         self.pty.deinit();
+        self.pty_resume_at = null;
         self.outbox.clear(self.allocator);
         self.login_running = false;
         self.newSession() catch |e| {
@@ -823,11 +830,7 @@ pub const Console = struct {
             fds[n] = .{ .fd = self.sig_fd, .events = evdev.POLLIN, .revents = 0 };
             n += 1;
             const pty_i = n;
-            fds[n] = .{
-                .fd = if (self.login_running) self.pty.fd() else -1,
-                .events = if (self.outbox.pending()) evdev.POLLIN | evdev.POLLOUT else evdev.POLLIN,
-                .revents = 0,
-            };
+            fds[n] = self.ptyPollFd(nowMs());
             n += 1;
             const conf_i = n;
             fds[n] = .{ .fd = self.conf_watch, .events = evdev.POLLIN, .revents = 0 };
@@ -887,6 +890,17 @@ pub const Console = struct {
         }
     }
 
+    fn ptyPollFd(self: *Console, now: i64) evdev.PollFd {
+        if (self.pty_resume_at) |at| if (now >= at) {
+            self.pty_resume_at = null;
+        };
+        return .{
+            .fd = if (self.login_running and self.pty_resume_at == null) self.pty.fd() else -1,
+            .events = if (self.outbox.pending()) evdev.POLLIN | evdev.POLLOUT else evdev.POLLIN,
+            .revents = 0,
+        };
+    }
+
     fn timeoutMs(self: *const Console) c_int {
         var ms: i64 = -1;
         const now = nowSeconds();
@@ -894,7 +908,7 @@ pub const Console = struct {
         if (self.have_display and self.settings.cursor_blink) {
             ms = if (ms < 0) 500 else @min(ms, 500);
         }
-        for ([_]?i64{ self.display_retry_at, self.login_retry_at, self.hold_until }) |deadline| {
+        for ([_]?i64{ self.display_retry_at, self.login_retry_at, self.hold_until, self.pty_resume_at }) |deadline| {
             const left = @max(0, (deadline orelse continue) - nowMs());
             ms = if (ms < 0) left else @min(ms, left);
         }
@@ -984,9 +998,9 @@ pub const Console = struct {
         // Bounded, so a flood of output cannot starve the keyboard.
         while (rounds < 16) : (rounds += 1) {
             const n = self.pty.readSome(&buf) catch {
-                // The slave side closed: login ended; SIGCHLD will say so, but do
-                // not spin on a closed descriptor meanwhile.
-                if (self.pty.poll() != null) self.loginExited();
+                // Nothing has the terminal open. Usually login has ended;
+                // if it still runs, do not spin on the descriptor.
+                if (self.pty.poll() != null) self.loginExited() else self.pty_resume_at = nowMs() + hangup_wait_ms;
                 dirty.* = true;
                 return;
             };
@@ -1292,6 +1306,8 @@ fn testConsole(a: std.mem.Allocator) !*Console {
     c.settings = config.Settings.resolve(.{}, 1);
     c.settings.login_program = "/bin/true";
     c.settings.issue_file = "";
+    // Otherwise the pending health check makes every poll timeout 0.
+    c.healthy_done = true;
     c.scheme = termcore.schemes.scheme("campbell");
     c.renderer.cell_w = 8;
     c.renderer.cell_h = 16;
@@ -1353,7 +1369,7 @@ test "a display that cannot be taken is retried, then given up" {
         c.displayFailed();
         try std.testing.expect(!c.quit and !c.use_fallback);
         try std.testing.expect(c.display_retry_at.? >= before + wait);
-        try std.testing.expect(c.timeoutMs() <= wait);
+        try std.testing.expect(c.timeoutMs() > wait - 50 and c.timeoutMs() <= wait);
         waited += wait;
     }
     try std.testing.expect(waited < 5000);
@@ -1370,7 +1386,7 @@ test "a login that cannot start is retried, then the fallback takes over" {
     while (!c.quit) : (tries += 1) {
         try std.testing.expect(!c.login_running);
         try std.testing.expect(c.login_retry_at != null);
-        try std.testing.expect(c.timeoutMs() <= login_retry_ms);
+        try std.testing.expect(c.timeoutMs() > login_retry_ms - 500 and c.timeoutMs() <= login_retry_ms);
         c.startLogin();
     }
     try std.testing.expect(c.use_fallback);
@@ -1409,7 +1425,7 @@ test "a render hold that is never released runs out" {
     c.stream.nextSlice("\x1b[?2026h");
     const deadline = c.hold_until.?;
     try std.testing.expect(deadline >= before + render_hold_ms);
-    try std.testing.expect(c.timeoutMs() <= render_hold_ms);
+    try std.testing.expect(c.timeoutMs() > render_hold_ms - 500 and c.timeoutMs() <= render_hold_ms);
     try std.testing.expect(!c.expireRenderHold(deadline - 1));
     try std.testing.expect(c.expireRenderHold(deadline));
     try std.testing.expect(c.hold_until == null);
@@ -1417,4 +1433,32 @@ test "a render hold that is never released runs out" {
     // Released in time, there is nothing to expire.
     c.stream.nextSlice("\x1b[?2026h\x1b[?2026l");
     try std.testing.expect(c.hold_until == null);
+}
+
+test "a hung-up terminal with a running program does not spin the loop" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    c.pty = try Pty.spawn(std.testing.allocator, .{
+        .path = "/bin/sh",
+        .argv = &.{ "sh", "-c", "exec <&- >&- 2>&-; sleep 0.5; echo back >/dev/tty; sleep 5" },
+        .env = &.{"PATH=/usr/bin:/bin"},
+        .size = .{ .cols = 80, .rows = 24 },
+    });
+    c.login_running = true;
+
+    // The loop's own calls, for a second.
+    var wakes: u32 = 0;
+    var dirty = false;
+    const end = nowMs() + 1000;
+    while (nowMs() < end) {
+        var fds = [1]evdev.PollFd{c.ptyPollFd(nowMs())};
+        const wait = c.timeoutMs();
+        _ = poll(&fds, 1, if (wait < 0 or wait > 100) 100 else wait);
+        if (fds[0].revents != 0) c.readPty(&dirty);
+        wakes += 1;
+    }
+    try std.testing.expect(wakes < 100);
+    try std.testing.expect(c.login_running);
+    // What the program wrote after reopening the terminal still arrived.
+    try std.testing.expect(try screenHas(c, "back"));
 }
