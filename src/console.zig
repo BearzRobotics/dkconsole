@@ -420,7 +420,7 @@ pub const Console = struct {
     // ---- display -------------------------------------------------------------------
 
     fn openDisplay(self: *Console) bool {
-        var d = drm.Device.openFirst(self.allocator) catch |e| {
+        var d = drm.Device.openFirst(self.allocator, self.settings.display) catch |e| {
             log.err("no DRM device usable: {s}", .{@errorName(e)});
             return false;
         };

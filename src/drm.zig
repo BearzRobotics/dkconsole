@@ -208,9 +208,10 @@ pub const Device = struct {
 
     pub const Error = error{ NoDevice, NoDumbBuffers, NoOutput, ModeSetFailed, OutOfMemory, BufferFailed };
 
-    /// Open the first /dev/dri/cardN that has a connected display.
-    pub fn openFirst(allocator: std.mem.Allocator) Error!Device {
-        var best: ?Device = null;
+    /// Opens the /dev/dri/cardN that has the connected display named
+    /// `display`, or else the first that has any connected display.
+    pub fn openFirst(allocator: std.mem.Allocator, display: []const u8) Error!Device {
+        var first: ?Device = null;
         var n: u32 = 0;
         while (n < 8) : (n += 1) {
             var pb: [32]u8 = undefined;
@@ -228,18 +229,23 @@ pub const Device = struct {
                 continue;
             }
             dev.setMaster();
-            if (dev.probe(allocator)) |_| {
+            dev.setDisplay(display);
+            if (dev.probeNamed(allocator, dev.wantedDisplay())) |_| {
                 log.info("{s}: in use", .{path});
-                if (best) |old| _ = sys.close(old.fd);
+                if (first) |old| _ = sys.close(old.fd);
                 return dev;
-            } else |e| {
-                log.info("{s}: no usable output ({s})", .{ path, @errorName(e) });
-                // No display on this card (a render-only or empty GPU).
-                if (best == null) best = dev else _ = sys.close(fd);
+            } else |_| {}
+            // The named display is elsewhere, or nowhere.
+            if (first == null) {
+                if (dev.probeNamed(allocator, "")) |_| {
+                    first = dev;
+                    continue;
+                } else |e| log.info("{s}: no usable output ({s})", .{ path, @errorName(e) });
             }
+            // A render-only or empty GPU, or a card not needed.
+            _ = sys.close(fd);
         }
-        if (best) |b| _ = sys.close(b.fd);
-        return error.NoDevice;
+        return first orelse error.NoDevice;
     }
 
     pub fn close(self: *Device) void {
@@ -349,12 +355,24 @@ pub const Device = struct {
         };
     }
 
-    /// Find the wanted (`display`) or else first connected connector, its mode and a CRTC for it.
+    /// Find the wanted (`display`) or else first connected connector, its mode
+    /// and a CRTC for it. A name that matches nothing, a typo or an unplugged
+    /// monitor, must not leave the console without a screen.
     pub fn probe(self: *Device, allocator: std.mem.Allocator) Error!Output {
+        const want = self.wantedDisplay();
+        if (want.len > 0) {
+            if (self.probeNamed(allocator, want)) |out| return out else |e| {
+                if (e != error.NoOutput) return e;
+                log.warn("no connected display is named {s} (see `dkconsole report` for the names); using the first one", .{want});
+            }
+        }
+        return self.probeNamed(allocator, "");
+    }
+
+    /// The first connected connector named `want_name`, or any when empty.
+    fn probeNamed(self: *Device, allocator: std.mem.Allocator, want_name: []const u8) Error!Output {
         const res = try self.readResources(allocator);
         defer res.deinit(allocator);
-        const want_name = self.wantedDisplay();
-        var skipped_for_name = false;
 
         for (res.connectors[0..res.connector_count]) |cid| {
             const conn = self.readConnector(allocator, cid) orelse continue;
@@ -363,16 +381,12 @@ pub const Device = struct {
             if (c.connection != DRM_MODE_CONNECTED or conn.mode_count == 0) continue;
             if (want_name.len > 0) {
                 var nb: [32]u8 = undefined;
-                if (!std.mem.eql(u8, connectorName(&nb, c.connector_type, c.connector_type_id), want_name)) {
-                    skipped_for_name = true;
-                    continue;
-                }
+                if (!std.mem.eql(u8, connectorName(&nb, c.connector_type, c.connector_type_id), want_name)) continue;
             }
             const mode = pickModeFor(conn.modes[0..conn.mode_count], self.want) orelse continue;
             const crtc = self.pickCrtc(c.encoder_id, conn.encoders[0..conn.encoder_count], res.crtcs[0..res.crtc_count]) orelse continue;
             return .{ .connector_id = cid, .crtc_id = crtc, .mode = mode, .mm_width = c.mm_width, .mm_height = c.mm_height, .connector_type = c.connector_type, .connector_type_id = c.connector_type_id };
         }
-        if (skipped_for_name) log.warn("no connected display is named {s}; see `dkconsole report` for the names", .{want_name});
         return error.NoOutput;
     }
 

@@ -163,6 +163,12 @@ tests() {
     check "an unavailable mode falls back with a warning" bash -c "grep -q 'display has no 800x600' serial.log && grep -q 'display settings changed' serial.log"
     settle 3; shot m1_after
     check "the screen is still alive after it"    wait_lit m1_after 200 30
+    $TOOLS type 'dkconsole config set display HDMI-A-9; sleep 2; echo DISPLAY-DONE > /dev/ttyS0\n'
+    check "a display name that matches nothing is warned about" wait_serial "no connected display is named HDMI-A-9" 60
+    wait_serial "DISPLAY-DONE" 60
+    shot m2_before; $TOOLS type 'echo STILL-HERE\n'; settle 4; shot m2_after
+    check "and the console still draws"           bash -c "! $TOOLS same '$CACHE/m2_before.ppm' '$CACHE/m2_after.ppm'"
+    $TOOLS type 'dkconsole config set display ""; sleep 2\n'; settle 4
 
     echo "== logout and a new login"
     $TOOLS type 'exit\n'
