@@ -167,6 +167,15 @@ const FontSet = struct {
     }
 };
 
+/// Where a selection started: a pin the terminal keeps pointing at the same
+/// text while output, scrolling and resizing move it.
+const Anchor = struct {
+    key: @FieldType(vt.Terminal, "screens").Key,
+    /// Changes if the screen is destroyed, taking its pins with it.
+    generation: usize,
+    pin: *vt.Pin,
+};
+
 pub const Console = struct {
     allocator: std.mem.Allocator,
     vt_num: u32,
@@ -233,7 +242,7 @@ pub const Console = struct {
     pointer_y: i32 = 0,
     pointer_shown_rows: ?[2]u32 = null,
     selecting: bool = false,
-    anchor: ?vt.Pin = null,
+    anchor: ?Anchor = null,
     primary: std.ArrayList(u8) = .empty,
 
     /// The fonts changed while this VT was in the background.
@@ -614,6 +623,7 @@ pub const Console = struct {
         self.input.closeAll();
         self.decoder.reset();
         self.selecting = false;
+        self.dropAnchor();
     }
 
     /// The kernel asks to switch away: let go of everything, then say yes. The
@@ -1289,6 +1299,31 @@ pub const Console = struct {
         self.send(&.{w.buffered()});
     }
 
+    fn setAnchor(self: *Console, at: vt.Pin) void {
+        self.dropAnchor();
+        const screens = &self.term.screens;
+        const pin = screens.active.pages.trackPin(at) catch return;
+        self.anchor = .{ .key = screens.active_key, .generation = screens.generation(screens.active_key), .pin = pin };
+    }
+
+    fn dropAnchor(self: *Console) void {
+        const anchor = self.anchor orelse return;
+        self.anchor = null;
+        const screens = &self.term.screens;
+        if (screens.generation(anchor.key) != anchor.generation) return;
+        if (screens.get(anchor.key)) |screen| screen.pages.untrackPin(anchor.pin);
+    }
+
+    /// The anchor's pin, if it still marks text on the screen being shown.
+    fn anchorPin(self: *const Console) ?vt.Pin {
+        const anchor = self.anchor orelse return null;
+        const screens = &self.term.screens;
+        if (screens.active_key != anchor.key or screens.generation(anchor.key) != anchor.generation) return null;
+        // The text it marked has left the scrollback.
+        if (anchor.pin.garbage) return null;
+        return anchor.pin.*;
+    }
+
     fn pointerMoved(self: *Console, dirty: *bool) void {
         dirty.* = true;
         const shift = self.decoder.shiftHeld();
@@ -1301,7 +1336,7 @@ pub const Console = struct {
         const cell = self.cellAt();
         const screen = self.term.screens.active;
         const pin = screen.pages.pin(.{ .viewport = .{ .x = cell.col, .y = cell.row } }) orelse return;
-        const anchor = self.anchor orelse return;
+        const anchor = self.anchorPin() orelse return screen.clearSelection();
         screen.select(vt.Selection.init(anchor, pin, self.decoder.altHeld())) catch return;
     }
 
@@ -1329,10 +1364,15 @@ pub const Console = struct {
             const cell = self.cellAt();
             const pin = screen.pages.pin(.{ .viewport = .{ .x = cell.col, .y = cell.row } }) orelse return;
             self.selecting = true;
-            self.anchor = pin;
+            self.setAnchor(pin);
             screen.clearSelection();
         } else {
             self.selecting = false;
+            // A selection whose start is gone, or on another screen by now,
+            // is not what was dragged over.
+            const intact = self.anchorPin() != null;
+            self.dropAnchor();
+            if (!intact) return;
             // Selecting copies, within this console (SPEC.md 5.11).
             const selection = screen.selection orelse return;
             const text = screen.selectionString(self.allocator, .{ .sel = selection }) catch return;
@@ -1606,4 +1646,42 @@ test "programs set the paste buffer only when allowed to" {
     c.settings.osc52 = true;
     c.stream.nextSlice("\x1b]52;c;aW5qZWN0ZWQ=\x07");
     try std.testing.expectEqualStrings("injected", c.primary.items);
+}
+
+test "a selection whose start is gone is dropped, not copied" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    var dirty = false;
+    c.setPrimary("earlier");
+    // Dragging within unchanged text copies it.
+    c.stream.nextSlice("first line\r\n");
+    c.pointer_x = 0;
+    c.pointer_y = 0;
+    c.handleButton(evdev.BTN_LEFT, true, &dirty);
+    c.pointer_x = 8 * 4;
+    c.pointerMoved(&dirty);
+    c.handleButton(evdev.BTN_LEFT, false, &dirty);
+    try std.testing.expectEqualStrings("first", c.primary.items);
+
+    // The pressed line scrolls out of the history during the drag.
+    c.setPrimary("earlier");
+    c.handleButton(evdev.BTN_LEFT, true, &dirty);
+    var line: [32]u8 = undefined;
+    for (0..200_000) |i| c.stream.nextSlice(try std.fmt.bufPrint(&line, "line {d}\r\n", .{i}));
+    try std.testing.expect(c.anchorPin() == null);
+    c.pointerMoved(&dirty);
+    c.handleButton(evdev.BTN_LEFT, false, &dirty);
+    try std.testing.expectEqualStrings("earlier", c.primary.items);
+    try std.testing.expect(c.anchor == null);
+
+    // The program switches screens during the drag.
+    c.handleButton(evdev.BTN_LEFT, true, &dirty);
+    c.stream.nextSlice("\x1b[?1049hother screen");
+    c.pointerMoved(&dirty);
+    c.handleButton(evdev.BTN_LEFT, false, &dirty);
+    try std.testing.expectEqualStrings("earlier", c.primary.items);
+    // And a logout in the middle of one.
+    c.handleButton(evdev.BTN_LEFT, true, &dirty);
+    c.loginExited();
+    try std.testing.expect(c.anchor == null);
 }
