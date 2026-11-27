@@ -256,20 +256,39 @@ extern fn clock_gettime(clock: c_int, ts: *Timespec) c_int;
 var log_fd: c_int = -1;
 var log_bytes: usize = 0;
 const log_cap = 1 << 20;
+var log_path_buf: [96]u8 = undefined;
+var log_path_len: usize = 0;
 
 /// Start `<dir>/tty<vt>.log`, keeping the previous one as `.log.1`.
 pub fn openLogFile(dir: []const u8, vt: u32) void {
-    var pb: [96]u8 = undefined;
+    makePrivateDir(dir);
+    const path = std.fmt.bufPrint(&log_path_buf, "{s}/tty{d}.log", .{ dir, vt }) catch return;
+    log_path_len = path.len;
+    startLogFile();
+}
+
+/// A new, empty log; the one in use, or left by the last run, becomes `.log.1`.
+fn startLogFile() void {
+    const path = log_path_buf[0..log_path_len];
     var ob: [100]u8 = undefined;
-    const path = std.fmt.bufPrint(&pb, "{s}/tty{d}.log", .{ dir, vt }) catch return;
     const old = std.fmt.bufPrint(&ob, "{s}.1", .{path}) catch return;
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     var b2: [std.fs.max_path_bytes]u8 = undefined;
-    makePrivateDir(dir);
     const pz = pathZ(&b1, path) orelse return;
     const oz = pathZ(&b2, old) orelse return;
+    if (log_fd >= 0) _ = close(log_fd);
     _ = rename(pz.ptr, oz.ptr);
     log_fd = open(pz.ptr, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, @as(c_uint, 0o600));
+    log_bytes = 0;
+}
+
+/// A full log starts over, so the newest lines, the ones that explain a
+/// failure, are always kept.
+fn appendToLog(line: []const u8) void {
+    if (log_fd >= 0 and log_bytes + line.len > log_cap) startLogFile();
+    if (log_fd < 0) return;
+    writeAllFd(log_fd, line) catch {};
+    log_bytes += line.len;
 }
 
 pub fn parseLevel(text: []const u8) std.log.Level {
@@ -299,10 +318,7 @@ pub fn logFn(
     if (scope != .default) w.print("({s})", .{@tagName(scope)}) catch {};
     w.print(": " ++ fmt ++ "\n", args) catch {};
     writeAllFd(2, w.buffered()) catch {};
-    if (log_fd >= 0 and log_bytes < log_cap) {
-        writeAllFd(log_fd, w.buffered()) catch {};
-        log_bytes += w.buffered().len;
-    }
+    appendToLog(w.buffered());
 }
 
 const testing = std.testing;
@@ -351,4 +367,29 @@ test "the runtime directory is private, also if it was not" {
     defer _ = std.os.linux.rmdir(dir.ptr);
     makePrivateDir(dir);
     try testing.expectEqual(@as(u16, 0o700), modeOf(dir.ptr, true) & 0o7777);
+}
+
+test "a full log starts over and keeps the newest lines" {
+    var nb: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&nb, "/tmp/dkconsole-log-{d}", .{getpid()}, 0);
+    openLogFile(dir, 1);
+    defer {
+        _ = close(log_fd);
+        log_fd = -1;
+        var pb: [96]u8 = undefined;
+        for ([_][]const u8{ "tty1.log", "tty1.log.1" }) |name| {
+            const p = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0) catch unreachable;
+            _ = unlink(p.ptr);
+        }
+        _ = std.os.linux.rmdir(dir.ptr);
+    }
+    const filler: [4096]u8 = @splat('x');
+    for (0..log_cap / filler.len + 1) |_| appendToLog(&filler);
+    appendToLog("the newest line\n");
+    var pb: [96]u8 = undefined;
+    const now = try readFile(testing.allocator, try std.fmt.bufPrint(&pb, "{s}/tty1.log", .{dir}), log_cap);
+    defer testing.allocator.free(now);
+    try testing.expect(std.mem.endsWith(u8, now, "the newest line\n"));
+    const before = try readFile(testing.allocator, try std.fmt.bufPrint(&pb, "{s}/tty1.log.1", .{dir}), log_cap);
+    testing.allocator.free(before);
 }
