@@ -36,6 +36,16 @@ fn nowSeconds() i64 {
     return ts.sec;
 }
 
+fn nowMs() i64 {
+    var ts: Timespec = undefined;
+    _ = clock_gettime(1, &ts);
+    return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
+}
+
+/// How long to wait before each further try at taking the display. Another
+/// process, our own on another VT included, may still hold it for a moment.
+const display_retry_ms = [_]i64{ 100, 200, 400, 800, 1600 };
+
 const login_paths = [_][:0]const u8{ "/bin/login", "/usr/bin/login", "/sbin/login", "/usr/sbin/login" };
 
 pub const Options = struct { vt: u32 };
@@ -156,6 +166,14 @@ pub const Console = struct {
     flip_pending: bool = false,
     damage: [2]Damage = .{ .{}, .{} },
     have_display: bool = false,
+    /// The VT is shown and the keyboard read, but taking the display failed:
+    /// how often, and when to try again.
+    display_failures: u32 = 0,
+    display_retry_at: ?i64 = null,
+    /// Hand the VT to the fallback getty once everything is released.
+    use_fallback: bool = false,
+    /// The keyboard is open: whenever this VT is shown, display or not.
+    have_input: bool = false,
     input: evdev.Input = undefined,
     keymap: kbd.Keymap = undefined,
     decoder: kbd.Decoder = undefined,
@@ -265,6 +283,12 @@ pub const Console = struct {
         self.loop();
         log.info("stopping", .{});
         self.shutdown();
+        if (self.use_fallback) {
+            log.err("using the plain getty: {s}", .{self.settings.fallback});
+            fallback.execFallback(a, self.settings.fallback, &self.vtdev);
+            return 1;
+        }
+        self.vtdev.close();
         return 0;
     }
 
@@ -277,7 +301,6 @@ pub const Console = struct {
         if (self.dev) |*d| d.close();
         // Back to a text console for whoever comes next.
         self.vtdev.restoreText();
-        self.vtdev.close();
     }
 
     fn loadSettings(self: *Console) void {
@@ -421,8 +444,25 @@ pub const Console = struct {
         });
     }
 
-    /// Frame buffers, input devices and the keymap: what only the visible VT holds.
+    /// Input devices, the keymap and frame buffers: what only the visible VT
+    /// holds.
     fn acquire(self: *Console) void {
+        // The keyboard first. The kernel's own is off, so until ours is read
+        // nobody can switch away from this VT.
+        self.input.open();
+        self.have_input = true;
+        if (kbd.Keymap.load(self.allocator, self.vtdev.fd)) |km| {
+            self.keymap.deinit();
+            self.keymap = km;
+            self.decoder = kbd.Decoder.init(&self.keymap);
+        } else |e| log.warn("acquire: cannot read the keymap ({s}); keeping the previous one", .{@errorName(e)});
+        log.debug("acquire: {d} input device(s)", .{self.input.devices.items.len});
+        self.display_failures = 0;
+        self.takeDisplay();
+    }
+
+    fn takeDisplay(self: *Console) void {
+        self.display_retry_at = null;
         const d = &(self.dev orelse return);
         log.debug("acquire: taking the display", .{});
         d.setMaster();
@@ -441,36 +481,41 @@ pub const Console = struct {
         } else |e| log.warn("acquire: probing the outputs failed ({s}); keeping the old mode", .{@errorName(e)});
 
         for (0..2) |i| {
-            self.bufs[i] = d.createBuffer(self.out.width(), self.out.height()) catch |e| blk: {
-                log.err("acquire: cannot create frame buffer {d} ({s}); the screen stays blank", .{ i, @errorName(e) });
-                break :blk null;
+            self.bufs[i] = d.createBuffer(self.out.width(), self.out.height()) catch |e| {
+                log.err("acquire: cannot create frame buffer {d} ({s})", .{ i, @errorName(e) });
+                return self.displayFailed();
             };
-            if (self.bufs[i] == null) {
-                self.releaseDisplayResources();
-                return;
-            }
         }
         d.setMode(&self.out, &self.bufs[0].?) catch |e| {
-            log.err("acquire: cannot set the mode ({s}); the screen stays blank", .{@errorName(e)});
-            self.releaseDisplayResources();
-            return;
+            log.err("acquire: cannot set the mode ({s})", .{@errorName(e)});
+            return self.displayFailed();
         };
         self.back = 1;
         self.flip_pending = false;
         self.have_display = true;
+        self.display_failures = 0;
         for (&self.damage) |*dm| dm.full = true;
-
-        self.input.open();
-        if (kbd.Keymap.load(self.allocator, self.vtdev.fd)) |km| {
-            self.keymap.deinit();
-            self.keymap = km;
-            self.decoder = kbd.Decoder.init(&self.keymap);
-        } else |e| log.warn("acquire: cannot read the keymap ({s}); keeping the previous one", .{@errorName(e)});
-        log.debug("acquire: done, {d} input device(s)", .{self.input.devices.items.len});
+        log.debug("acquire: done", .{});
         self.draw(0);
     }
 
-    fn releaseDisplayResources(self: *Console) void {
+    /// Never keeps a blank VT for good: tries again shortly, with the keyboard
+    /// still working, and in the end gives the VT to the fallback getty.
+    fn displayFailed(self: *Console) void {
+        self.freeBuffers();
+        if (self.display_failures >= display_retry_ms.len) {
+            log.warn("acquire: giving up on the display", .{});
+            self.use_fallback = true;
+            self.quit = true;
+            return;
+        }
+        const wait = display_retry_ms[self.display_failures];
+        self.display_failures += 1;
+        self.display_retry_at = nowMs() + wait;
+        log.warn("acquire: trying the display again in {d} ms", .{wait});
+    }
+
+    fn freeBuffers(self: *Console) void {
         self.have_display = false;
         self.flip_pending = false;
         if (self.dev) |*d| {
@@ -480,6 +525,12 @@ pub const Console = struct {
             };
         }
         for (&self.damage) |*dm| dm.rows.clearRetainingCapacity();
+    }
+
+    fn releaseDisplayResources(self: *Console) void {
+        self.freeBuffers();
+        self.display_retry_at = null;
+        self.have_input = false;
         self.input.closeAll();
         self.decoder.reset();
         self.selecting = false;
@@ -741,7 +792,7 @@ pub const Console = struct {
             fds[n] = .{ .fd = if (self.have_display and self.flip_pending) self.dev.?.fd else -1, .events = evdev.POLLIN, .revents = 0 };
             n += 1;
             const input_i = n;
-            if (self.have_display) n += self.input.pollFds(fds[n..]);
+            if (self.have_input) n += self.input.pollFds(fds[n..]);
 
             const r = poll(&fds, n, self.timeoutMs());
             if (r < 0) {
@@ -768,13 +819,20 @@ pub const Console = struct {
                     dirty = true;
                 }
             }
-            if (self.have_display) {
+            if (self.have_input) {
                 events.clearRetainingCapacity();
                 for (fds[input_i..n]) |p| {
                     if (p.revents != 0) self.input.service(p.fd, &events);
                 }
-                for (events.items) |ev| self.handleInput(ev, &dirty);
+                for (events.items) |ev| {
+                    if (self.have_display) self.handleInput(ev, &dirty) else self.handleBlindInput(ev);
+                }
             }
+            if (self.display_retry_at) |at| if (nowMs() >= at) {
+                self.takeDisplay();
+                dirty = true;
+            };
+            if (self.quit) break;
             if (self.cursor_blink_due(now)) dirty = true;
             if (dirty) self.draw(now);
         }
@@ -786,6 +844,10 @@ pub const Console = struct {
         if (!self.healthy_done) ms = @max(0, self.healthy_at - now) * 1000;
         if (self.have_display and self.settings.cursor_blink) {
             ms = if (ms < 0) 500 else @min(ms, 500);
+        }
+        if (self.display_retry_at) |at| {
+            const left = @max(0, at - nowMs());
+            ms = if (ms < 0) left else @min(ms, left);
         }
         return @intCast(ms);
     }
@@ -1013,6 +1075,18 @@ pub const Console = struct {
         }
     }
 
+    /// With nothing on the screen only switching away works: nobody should
+    /// type at a prompt they cannot see.
+    fn handleBlindInput(self: *Console, ev: evdev.Event) void {
+        switch (ev) {
+            .key => |k| {
+                const decoded = self.decoder.feed(k.code, k.value);
+                if (kbd.vtSwitch(&decoded)) |n| self.vtdev.activate(n);
+            },
+            else => {},
+        }
+    }
+
     fn handleKey(self: *Console, code: u16, value: i32, dirty: *bool) void {
         const ev = self.decoder.feed(code, value);
         // The pointer hides again on the next key press.
@@ -1219,4 +1293,21 @@ test "nothing of a session survives logout" {
     try std.testing.expect(!try screenHas(c, "TOPSECRET"));
     c.stream.nextSlice("\x1b[?1049l");
     try std.testing.expect(!try screenHas(c, "TOPSECRET"));
+}
+
+test "a display that cannot be taken is retried, then given up" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    var waited: i64 = 0;
+    for (display_retry_ms) |wait| {
+        const before = nowMs();
+        c.displayFailed();
+        try std.testing.expect(!c.quit and !c.use_fallback);
+        try std.testing.expect(c.display_retry_at.? >= before + wait);
+        try std.testing.expect(c.timeoutMs() <= wait);
+        waited += wait;
+    }
+    try std.testing.expect(waited < 5000);
+    c.displayFailed();
+    try std.testing.expect(c.quit and c.use_fallback);
 }
