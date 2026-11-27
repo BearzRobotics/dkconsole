@@ -1130,7 +1130,7 @@ pub const Console = struct {
     fn markRow(self: *Console, y: usize) void {
         for (&self.damage) |*dm| {
             if (dm.full) continue;
-            if (dm.rows.items.len <= y) dm.rows.resize(self.allocator, y + 1) catch {
+            if (dm.rows.items.len <= y) dm.rows.appendNTimes(self.allocator, false, y + 1 - dm.rows.items.len) catch {
                 dm.full = true;
                 continue;
             };
@@ -1810,4 +1810,14 @@ test "a settings directory created later is watched" {
     try sys.writeFileAtomic(path, "[console]\n");
     defer _ = sys.unlink(file.ptr);
     try std.testing.expect(sys.read(c.conf_watch, &events, events.len) > 0);
+}
+
+test "marking a row marks only that row" {
+    const c = try testConsole(std.testing.allocator);
+    defer destroyTestConsole(c);
+    for (&c.damage) |*d| d.full = false;
+    c.markRow(6);
+    c.markRow(2);
+    c.markRow(9);
+    for (&c.damage) |*d| try std.testing.expectEqualSlices(bool, &.{ false, false, true, false, false, false, true, false, false, true }, d.rows.items);
 }
