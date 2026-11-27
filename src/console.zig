@@ -825,7 +825,7 @@ pub const Console = struct {
     }
 
     fn onXtversion(_: *vt.TerminalStream.Handler) []const u8 {
-        return "dkconsole 0.1";
+        return "dkconsole " ++ build_options.version;
     }
 
     fn ptySize(self: *const Console) termcore.pty.Size {
